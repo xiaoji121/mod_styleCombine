@@ -6,10 +6,6 @@
 #include <ctype.h>
 #include <sys/stat.h>
 #include <malloc.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
 
 #include "httpd.h"
 #include "apr_buckets.h"
@@ -40,13 +36,6 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 
 #define DEFAULT_CONTENT_LEN (1024 << 10)  // default html content size 1M
 
-const char ZERO_END = '\0';
-
-/*position char */
-const char pf = 'f'; //footer
-const char pt = 't'; //top
-const char ph = 'h'; //head
-
 #define FIELD_POSITION "pos=" //position
 #define POSITION_LEN 4
 #define POSITION_TOP "top"
@@ -72,13 +61,18 @@ typedef struct {
 	int styleType; /*0:表示css; 1:表示js*/
 } ParserTag;
 
-typedef struct {
-	ParserTag   *cssPtag;
-	ParserTag   *jsPtag;
-	buffer      *maxUrlBuf;
-	buffer      *maxTagBuf;
-	apr_table_t *styleTable;
-} GlobalVarible;
+/***********global variable************/
+const char ZERO_END = '\0';
+/*position char */
+const char pf = 'f'; //footer
+const char pt = 't'; //top
+const char ph = 'h'; //head
+
+ParserTag    *cssPtag;
+ParserTag    *jsPtag;
+apr_table_t  *styleTable;
+apr_time_t    lastLoadTime;
+
 
 typedef struct {
 	int        enabled;
@@ -88,9 +82,8 @@ typedef struct {
 	char      *versionFilePath;
 
 	//style combined auto not impl yet
+	int        delBlankSpace;
 	int        styleIsCombined;
-
-	GlobalVarible *gVarible;
 } CombineConfig;
 
 
@@ -100,7 +93,6 @@ typedef struct {
 } CombineCtx;
 
 typedef struct {
-	int      styleType;
 	char     postion;
 	buffer  *styleUri;
 	time_t   version;
@@ -118,6 +110,9 @@ typedef struct {
 
 buffer *buffer_init() {
 	buffer *buf = malloc(sizeof(buffer));
+	if(buf == NULL) {
+		return buf;
+	}
 	buf->ptr = NULL;
 	buf->used = 0;
 	buf->size = 0;
@@ -125,9 +120,11 @@ buffer *buffer_init() {
 }
 
 buffer *buffer_init_size(int size) {
-	buffer *buf = malloc(sizeof(buffer));
+	buffer *buf = buffer_init();
+	if(buf == NULL) {
+		return buf;
+	}
 	buf->ptr = malloc(size);
-	buf->used = 0;
 	buf->size = size;
 	return buf;
 }
@@ -139,26 +136,34 @@ void buffer_free(buffer *b) {
 	free(b->ptr);
 	free(b);
 }
+void combinedStyle_free(CombinedStyle *c) {
+	if(c == NULL) {
+		return ;
+	}
+	buffer_free(c->footerBuf);
+	buffer_free(c->headBuf);
+	buffer_free(c->topBuf);
+}
 
 void free_linkedList(StyleLinkList *link) {
 	for(; link != NULL; link = link->prevItem) {
 		StyleLinkList *tmpLink = link;
-		buffer_free(tmpLink->styleUri);
+		free(tmpLink->styleUri);
 		free(tmpLink);
 	}
 }
 /**
  * get uri extention
  */
-static char *getFileExt(char *uri) {
+static char *getFileExt(char *uri, int len) {
 	if (uri == NULL) {
 		return NULL;
 	}
 
-	if (0 == memcmp(EXT_JS, uri + strlen(uri) - 3, 3)) {
+	if (0 == memcmp(EXT_JS, uri + len - 3, 3)) {
 		return EXT_JS;
 	}
-	if (0 == memcmp(EXT_CSS, uri + strlen(uri) - 4, 4)) {
+	if (0 == memcmp(EXT_CSS, uri + len - 4, 4)) {
 		return EXT_CSS;
 	}
 	return NULL;
@@ -208,12 +213,12 @@ static void formatParser(apr_table_t *table, char *str, int len) {
 	}
 }
 
-time_t getURIVersion(CombineConfig *pConfig, buffer *uri, char *singleUri) {
+time_t getURIVersion(buffer *uri, char *singleUri) {
 
 	time_t lastModified = 0;
 	time_t newVersion = 0;
 
-	char *fileExt = getFileExt(uri->ptr);
+	char *fileExt = getFileExt(uri->ptr, uri->used);
 	if (fileExt == NULL) {
 		return 0;
 	}
@@ -221,24 +226,24 @@ time_t getURIVersion(CombineConfig *pConfig, buffer *uri, char *singleUri) {
 	int uriLen = uri->used;
 
 	int i , t = 0;
-	for(i = 0; i < uriLen; i++) {
+	for(i = 0; i < uriLen; ++i, ++t) {
 		if(i != 0 && memcmp(&uri->ptr[i], URI_SEPARATOR, 1) == 0) {
 			singleUri[t] = ZERO_END;
 		} else {
-			singleUri[t++] = uri->ptr[i];
+			singleUri[t] = uri->ptr[i];
 			if((i + 1) != uriLen) {
 				continue;
 			}
-			singleUri[t++] = uri->ptr[i + 1];
+			singleUri[++t] = uri->ptr[++i];
 			singleUri[t] = ZERO_END;
 		}
-		if (getFileExt(singleUri) == NULL) {
+		if (getFileExt(singleUri, t) == NULL) {
 			memcpy(singleUri + t, fileExt, fileExtLen);
 		}
-		t = 0;
+		t = -1;
 
-		if(pConfig->gVarible->styleTable != NULL) {
-			const char *strVs = apr_table_get(pConfig->gVarible->styleTable, singleUri);
+		if(styleTable != NULL) {
+			const char *strVs = apr_table_get(styleTable, singleUri);
 			if(strVs != NULL) {
 				newVersion = atol(strVs);
 			}
@@ -266,9 +271,6 @@ static char strToPosition(char *str) {
 	return ' ';
 }
 
-//lastload version time
-apr_time_t lastLoadTime;
-
 static void loadStyleVersion(apr_pool_t *pool,CombineConfig *pConfig) {
 
 	apr_finfo_t finfo;
@@ -292,7 +294,7 @@ static void loadStyleVersion(apr_pool_t *pool,CombineConfig *pConfig) {
 		rc = apr_file_read(fd, versionBuf->ptr, &amt);
 		if(rc == APR_SUCCESS) {
 			versionBuf->used = finfo.size;
-			formatParser(pConfig->gVarible->styleTable, versionBuf->ptr, versionBuf->used);
+			formatParser(styleTable, versionBuf->ptr, versionBuf->used);
 		}
 		buffer_free(versionBuf);
 	}
@@ -327,12 +329,12 @@ static int tagFilter(CombineConfig *pConfig, ParserTag *ptag, char *tagBuf, buff
 		//no .js/.css ext
 		return 0;
 	}
-	uriBuf->used = i;
+	uriBuf->used = i++;
 	uriBuf->ptr[i] = ZERO_END;
 	return uriBuf->used;
 }
 
-static void addTag(CombineConfig *combineConfig, int styleType, buffer *destBuf, buffer *uri, time_t version) {
+static void addTag(CombineConfig *pConfig, int styleType, buffer *destBuf, buffer *uri, time_t version) {
 	if(uri == NULL || uri->used == 0) {
 		return ;
 	}
@@ -342,7 +344,7 @@ static void addTag(CombineConfig *combineConfig, int styleType, buffer *destBuf,
 	} else {
 		stringAppend(destBuf, JS_PREFIX_TXT, strlen(JS_PREFIX_TXT));
 	}
-	stringAppend(destBuf, combineConfig->domain->ptr, combineConfig->domain->used);
+	stringAppend(destBuf, pConfig->domain->ptr, pConfig->domain->used);
 	stringAppend(destBuf, uri->ptr, uri->used);
 	stringAppend(destBuf, URI_QUERY_PARAM, 4);
 
@@ -357,12 +359,11 @@ static void addTag(CombineConfig *combineConfig, int styleType, buffer *destBuf,
 		stringAppend(destBuf, EXT_JS, 3);
 		stringAppend(destBuf, JS_SUFFIX_TXT, strlen(JS_SUFFIX_TXT));
 	}
-	destBuf->ptr[destBuf->used + 1] = ZERO_END;
+	destBuf->ptr[destBuf->used] = ZERO_END;
 }
 
 static void combineStyles(CombineConfig *pConfig, int styleType, StyleLinkList *linkList,
 								CombinedStyle *combinedStyle, CombinedStyle *tmpCombine) {
-
 	if(linkList == NULL) {
 		return;
 	}
@@ -438,6 +439,15 @@ static void combineStyles(CombineConfig *pConfig, int styleType, StyleLinkList *
 	addTag(pConfig, styleType, combinedStyle->topBuf, tmpCombine->topBuf, tv);
 	addTag(pConfig, styleType, combinedStyle->headBuf, tmpCombine->headBuf, hv);
 	addTag(pConfig, styleType, combinedStyle->footerBuf, tmpCombine->footerBuf, fv);
+}
+
+static int isRepeat(apr_hash_t *duplicats, char *destUri, int len) {
+	if(apr_hash_get(duplicats, destUri, len) != NULL) {
+		//if uri has exsit then skiping it
+		return 1;
+	}
+	apr_hash_set(duplicats, destUri, len, "0");
+	return 0;
 }
 
 static void addBucket(conn_rec *c, apr_bucket_brigade *pbbkOut, char *str, int strLen) {
@@ -528,27 +538,29 @@ static inline char *strSearch(const char * str1, char **matchedType, char **isEx
 	return (NULL);
 }
 
-static int htmlParser(CombinedStyle *combinedStyle, buffer *dstBuf, CombineConfig *pConfig, buffer *sourceCnt) {
+static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstBuf, CombineConfig *pConfig, buffer *sourceCnt) {
 
-	char *maxTagBuf = pConfig->gVarible->maxTagBuf->ptr;
-	buffer *uriBuf = pConfig->gVarible->maxUrlBuf;
-	uriBuf->used = 0;
-	char *singleUri = malloc(uriBuf->size);
+	char               *maxTagBuf = apr_palloc(r->pool, pConfig->maxUrlLen + 100);
+	buffer             *maxUrlBuf = buffer_init_size(pConfig->maxUrlLen);
+	apr_hash_t         *duplicates = apr_hash_make(r->pool);
 
-	StyleLinkList *jsLinkList = NULL;
-	StyleLinkList *cssLinkList = NULL;
-	StyleLinkList *jsPrevLinkList = NULL;
-	StyleLinkList *cssPrevLinkList = NULL;
+	if(maxTagBuf == NULL || maxUrlBuf == NULL) {
+		return 0;
+	}
+	StyleLinkList      *jsLinkList = NULL;
+	StyleLinkList      *cssLinkList = NULL;
+	StyleLinkList      *jsPrevLinkList = NULL;
+	StyleLinkList      *cssPrevLinkList = NULL;
 
 	char *subHtml = sourceCnt->ptr;
-	//(js/css)应该放置的位置 h:head; f:footer; l:lib(表示公共类库，放在<head>里面)
-	char position = 'h';
-	int isProcessed = 0;
-	ParserTag *ptag = NULL;
-	register int i = 0;
-	int ssize = pConfig->gVarible->maxTagBuf->size - 2;
+	int ssize = (pConfig->maxUrlLen + 98);
 	char *matchedType = NULL;
 	char *isExpression = "0";
+	//(js/css)应该放置的位置 h:head; f:footer; l:lib(表示公共类库，放在<head>里面)
+	register char position = 'h';
+	register int isProcessed = 0;
+	register ParserTag *ptag = NULL;
+	register int i = 0;
 	register char *curPoint = NULL;
 	register char *tmpPoint = NULL;
 
@@ -560,24 +572,28 @@ static int htmlParser(CombinedStyle *combinedStyle, buffer *dstBuf, CombineConfi
 		stringAppend(dstBuf, subHtml, curPoint - subHtml);
 
 		if(memcmp(matchedType, "j", 1) == 0) {
-			ptag = pConfig->gVarible->jsPtag;
+			ptag = jsPtag;
 		} else {
-			ptag = pConfig->gVarible->cssPtag;
+			ptag = cssPtag;
 		}
 		for (i = 0; (curPoint[i] != ptag->suffix) && i < ssize; i++) {
 			maxTagBuf[i] = curPoint[i];
 		}
 		maxTagBuf[i++] = ptag->suffix;
 		curPoint += i;
-		maxTagBuf[i++] = ZERO_END;
-		if (tagFilter(pConfig, ptag, maxTagBuf, uriBuf) == 0) {
-			stringAppend(dstBuf, maxTagBuf, i - 1);
+		maxTagBuf[i] = ZERO_END;
+		if (tagFilter(pConfig, ptag, maxTagBuf, maxUrlBuf) == 0) {
+			stringAppend(dstBuf, maxTagBuf, i);
 			subHtml = curPoint;
 			continue;
 		}
 		isProcessed = 1;
+
+		int singleUriLen = maxUrlBuf->used;
+		char *singleUri = apr_palloc(r->pool, singleUriLen);
 		// 0:single style; 1:multi style
-		time_t nversion = getURIVersion(pConfig, uriBuf, singleUri);
+		time_t nversion = getURIVersion(maxUrlBuf, singleUri);
+		memcpy(singleUri, maxUrlBuf->ptr, maxUrlBuf->used);
 
 		if (ptag->styleType == 1) {
 			/**
@@ -589,12 +605,16 @@ static int htmlParser(CombinedStyle *combinedStyle, buffer *dstBuf, CombineConfi
 
 			if (memcmp(ptag->closeTag->ptr, curPoint, ptag->closeTag->used) != 0) {
 				//找不到结束的</script>
-				stringAppend(dstBuf, maxTagBuf, i - 1);
+				stringAppend(dstBuf, maxTagBuf, i);
 				subHtml = curPoint;
 				continue;
 			}
 			curPoint += ptag->closeTag->used;
 
+			if(isRepeat(duplicates, singleUri, singleUriLen)) {
+				subHtml = curPoint;
+				continue;
+			}
 			//parser field
 			char *fpois = strstr(maxTagBuf, FIELD_POSITION);
 			if(fpois != NULL) {
@@ -602,20 +622,25 @@ static int htmlParser(CombinedStyle *combinedStyle, buffer *dstBuf, CombineConfi
 			}
 			position = strToPosition(fpois);
 			if (position == ' ') {
-				addTag(pConfig, ptag->styleType, dstBuf, uriBuf, nversion);
+				addTag(pConfig, ptag->styleType, dstBuf, maxUrlBuf, nversion);
+				subHtml = curPoint;
+				continue;
+			}
+		} else {
+			if(isRepeat(duplicates, singleUri, singleUriLen)) {
 				subHtml = curPoint;
 				continue;
 			}
 		}
 		//process expression <!--[if IE]>
 		if(memcmp(isExpression, "1", 1) == 0) {
-			addTag(pConfig, ptag->styleType, dstBuf, uriBuf, nversion);
+			addTag(pConfig, ptag->styleType, dstBuf, maxUrlBuf, nversion);
 			subHtml = curPoint;
 			continue;
 		}
 
 		//combined tag string
-		if (strstr(uriBuf->ptr, URI_SEPARATOR) != NULL) {
+		if (strstr(maxUrlBuf->ptr, URI_SEPARATOR) != NULL) {
 			buffer *tmpPosBuf = NULL;
 			switch (position) {
 			case 'f':
@@ -628,19 +653,25 @@ static int htmlParser(CombinedStyle *combinedStyle, buffer *dstBuf, CombineConfi
 				tmpPosBuf = combinedStyle->headBuf;
 				break;
 			}
-			addTag(pConfig, ptag->styleType, tmpPosBuf, uriBuf, nversion);
+			addTag(pConfig, ptag->styleType, tmpPosBuf, maxUrlBuf, nversion);
 		} else {
 			//add to linkList
 			StyleLinkList *linkItem = malloc(sizeof(StyleLinkList));
 			linkItem->prevItem = NULL;
 
-			linkItem->styleUri = buffer_init_size(uriBuf->used + 1);
+			buffer *styleUri = buffer_init();
+			styleUri->ptr = singleUri;
+			styleUri->used = singleUriLen;
+			styleUri->size = singleUriLen;
+			linkItem->styleUri = styleUri;
 
-			memcpy(linkItem->styleUri->ptr, uriBuf->ptr, uriBuf->used + 1);
-			linkItem->styleUri->used = uriBuf->used;
+			/*
+			linkItem->styleUri = buffer_init_size(maxUrlBuf->used + 1);
+			memcpy(linkItem->styleUri->ptr, maxUrlBuf->ptr, maxUrlBuf->used);
+			linkItem->styleUri->used = maxUrlBuf->used;
+			*/
 
 			linkItem->postion = position;
-			linkItem->styleType = ptag->styleType;
 			linkItem->version = nversion;
 
 			if(ptag->styleType == 0) {
@@ -663,74 +694,61 @@ static int htmlParser(CombinedStyle *combinedStyle, buffer *dstBuf, CombineConfi
 	}
 	if(isProcessed) {
 		stringAppend(dstBuf, subHtml, strlen(subHtml));
-
 		//create
 		CombinedStyle tmpCombine;
 		tmpCombine.topBuf = buffer_init();
 		tmpCombine.headBuf = buffer_init();
 		tmpCombine.footerBuf = buffer_init();
 
-		combineStyles(pConfig, pConfig->gVarible->cssPtag->styleType, cssLinkList, combinedStyle, &tmpCombine);
+		combineStyles(pConfig, cssPtag->styleType, cssLinkList, combinedStyle, &tmpCombine);
 		free_linkedList(cssLinkList);
 		//reset
 		tmpCombine.topBuf->used = 0;
 		tmpCombine.headBuf->used = 0;
 		tmpCombine.footerBuf->used = 0;
 
-		combineStyles(pConfig, pConfig->gVarible->jsPtag->styleType, jsLinkList, combinedStyle, &tmpCombine);
+		combineStyles(pConfig, jsPtag->styleType, jsLinkList, combinedStyle, &tmpCombine);
 		free_linkedList(jsLinkList);
 		//free
-		buffer_free(tmpCombine.topBuf);
-		buffer_free(tmpCombine.headBuf);
-		buffer_free(tmpCombine.footerBuf);
+		combinedStyle_free(&tmpCombine);
 	}
+	buffer_free(maxUrlBuf);
+	apr_hash_clear(duplicates);
+
 	if(0 != dstBuf->size) {
 		dstBuf->ptr[dstBuf->used] = ZERO_END;
 	}
-
-	free(singleUri);
 	return isProcessed;
 }
 
 static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 
-	CombineConfig *pConfig = apr_pcalloc(p, sizeof(CombineConfig));
+	CombineConfig *pConfig = apr_palloc(p, sizeof(CombineConfig));
 	pConfig->enabled = 0;
 	pConfig->filterCntType = NULL;
 	/**
 	 * see http://support.microsoft.com/kb/208427/EN-US
 	 * default len for ie 2083 char
 	 */
-	GlobalVarible *gVarible = apr_pcalloc(p, sizeof(GlobalVarible));
-	pConfig->gVarible = gVarible;
 	pConfig->maxUrlLen = 2083;
 
-	buffer *maxUrlBuf = buffer_init_size(pConfig->maxUrlLen);
-	buffer *maxTagBuf = buffer_init_size(pConfig->maxUrlLen + 100);
-	gVarible->maxUrlBuf = maxUrlBuf;
-	gVarible->maxTagBuf = maxTagBuf;
+	pConfig->domain = apr_palloc(p, sizeof(buffer));
 
-	buffer *domain = apr_pcalloc(p, sizeof(buffer));
-
-	pConfig->domain = domain;
-
-	ParserTag *jsPtag = apr_pcalloc(p, sizeof(ParserTag));
-	ParserTag *cssPtag = apr_pcalloc(p, sizeof(ParserTag));
-	gVarible->jsPtag = jsPtag;
-	gVarible->cssPtag = cssPtag;
+	jsPtag = apr_palloc(p, sizeof(ParserTag));
+	cssPtag = apr_palloc(p, sizeof(ParserTag));
 
 	// js config
-	buffer *jsPrefix = apr_pcalloc(p, sizeof(buffer));
+	buffer *jsPrefix = apr_palloc(p, sizeof(buffer));
 	jsPrefix->ptr = "<script";
 	jsPrefix->used = strlen(jsPrefix->ptr);
 	jsPrefix->size = jsPrefix->used;
 
-	buffer *jsCloseTag  = apr_pcalloc(p, sizeof(buffer));
+	buffer *jsCloseTag  = apr_palloc(p, sizeof(buffer));
 	jsCloseTag->ptr = "</script>";
 	jsCloseTag->used = strlen(jsCloseTag->ptr);
 	jsCloseTag->size = jsCloseTag->used;
 
-	buffer *jsMark  = apr_pcalloc(p, sizeof(buffer));
+	buffer *jsMark  = apr_palloc(p, sizeof(buffer));
 	jsMark->ptr = "src";
 	jsMark->used = strlen(jsMark->ptr);
 	jsMark->size = jsMark->used;
@@ -741,19 +759,18 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 	jsPtag->closeTag = jsCloseTag;
 	jsPtag->styleType = 1;
 
-
 	//css config
-	buffer *cssPrefix = apr_pcalloc(p, sizeof(buffer));
+	buffer *cssPrefix = apr_palloc(p, sizeof(buffer));
 	cssPrefix->ptr = "<link";
 	cssPrefix->used = strlen(cssPrefix->ptr);
 	cssPrefix->size = cssPrefix->used;
 
-	buffer *cssCloseTag  = apr_pcalloc(p, sizeof(buffer));
+	buffer *cssCloseTag  = apr_palloc(p, sizeof(buffer));
 	cssCloseTag->ptr = ">";
 	cssCloseTag->used = strlen(cssCloseTag->ptr);
 	cssCloseTag->size = cssCloseTag->used;
 
-	buffer *cssMark  = apr_pcalloc(p, sizeof(buffer));
+	buffer *cssMark  = apr_palloc(p, sizeof(buffer));
 	cssMark->ptr = "stylesheet";
 	cssMark->used = strlen(cssMark->ptr);
 	cssMark->size = cssMark->used;
@@ -765,7 +782,7 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 	cssPtag->styleType = 0;
 
 	//create version table
-	gVarible->styleTable = apr_table_make(p, 5000);
+	styleTable = apr_table_make(p, 5000);
 
 	return pConfig;
 }
@@ -815,9 +832,12 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 	}
 
 	if (ctx == NULL) {
-		ctx = f->ctx = apr_pcalloc(r->pool, sizeof(*ctx));
+		ctx = f->ctx = apr_palloc(r->pool, sizeof(*ctx));
 		ctx->pbbOut = apr_brigade_create(r->pool, c->bucket_alloc);
 		ctx->buf = buffer_init_size(DEFAULT_CONTENT_LEN);
+		if(ctx->buf == NULL) {
+			return ap_pass_brigade(f->next, pbbIn);
+		}
 	}
 
 	int isEOS = 0;
@@ -851,21 +871,28 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 		combinedStyle.topBuf = buffer_init();
 		combinedStyle.headBuf = buffer_init();
 		//load version
-		loadStyleVersion(r->pool, pConfig);
+//		loadStyleVersion(r->pool, pConfig);
 
-		buffer *dstBuf = buffer_init();
-		int res = htmlParser(&combinedStyle, dstBuf, pConfig, ctx->buf);
-		//if find any style
-		if(res) {
-			resetHtml(c, ctx->pbbOut, &combinedStyle, dstBuf);
+		buffer *dstBuf = buffer_init_size(ctx->buf->used);
+		if(dstBuf != NULL
+				&&combinedStyle.footerBuf != NULL
+				&&combinedStyle.topBuf != NULL
+				&&combinedStyle.headBuf != NULL) {
+			//if find any style
+			if(htmlParser(r, &combinedStyle, dstBuf, pConfig, ctx->buf)) {
+				resetHtml(c, ctx->pbbOut, &combinedStyle, dstBuf);
+			} else {
+				addBucket(c, ctx->pbbOut, ctx->buf->ptr, ctx->buf->used);
+			}
+		} else {
+			addBucket(c, ctx->pbbOut, ctx->buf->ptr, ctx->buf->used);
 		}
+
 		apr_bucket *pbktEOS = apr_bucket_eos_create(c->bucket_alloc);
 		APR_BRIGADE_INSERT_TAIL(ctx->pbbOut, pbktEOS);
 
 		//free
-		buffer_free(combinedStyle.footerBuf);
-		buffer_free(combinedStyle.topBuf);
-		buffer_free(combinedStyle.headBuf);
+		combinedStyle_free(&combinedStyle);
 		buffer_free(dstBuf);
 	}
 	apr_table_get(r->notes, "ok");
@@ -911,11 +938,6 @@ static const char *setMaxUrlLen(cmd_parms *cmd, void *dummy, const char *arg) {
 		ap_log_error(APLOG_MARK, LOG_ERR, 0, cmd->server, "maxUrlLen to small, will set default  2083!");
 	} else {
 		pConfig->maxUrlLen = len;
-		pConfig->gVarible->maxUrlBuf->ptr = realloc(pConfig->gVarible->maxUrlBuf->ptr, pConfig->maxUrlLen);
-		pConfig->gVarible->maxUrlBuf->size = pConfig->maxUrlLen;
-		//<script type=...
-		pConfig->gVarible->maxTagBuf->size = pConfig->maxUrlLen + 100;
-		pConfig->gVarible->maxTagBuf->ptr = realloc(pConfig->gVarible->maxTagBuf->ptr, pConfig->gVarible->maxTagBuf->size);
 	}
 	return NULL;
 }
