@@ -67,11 +67,12 @@ const char ZERO_END = '\0';
 const char pf = 'f'; //footer
 const char pt = 't'; //top
 const char ph = 'h'; //head
+int styleTableSize = 10000;
 
-ParserTag    *cssPtag;
-ParserTag    *jsPtag;
-apr_table_t  *styleTable;
-apr_time_t    lastLoadTime;
+ParserTag             *cssPtag;
+ParserTag             *jsPtag;
+volatile apr_table_t  *styleTable;
+volatile apr_time_t    lastLoadTime;
 
 
 typedef struct {
@@ -191,25 +192,23 @@ static void stringAppend(buffer *buf, char *str, int strLen) {
 }
 
 static void formatParser(apr_table_t *table, char *str, int len) {
-	if(str == NULL) {
+	if (str == NULL) {
 		return;
 	}
-	int i;
-	char *name,*next;
-	char *value=str;
+	char *name = NULL, *value = NULL;
+	char *srcStr = str;
+	char *strLine = NULL;
 
-	for(i=0 ;i < len ;i++) {
-		name = strsep(&value, "=");
-		if(name == NULL || memcmp(name, "", 1) == 0) {
-			break;//the end
+	while ((strLine = strsep(&srcStr, "\n")) != NULL) {
+		name = strsep(&strLine, "=");
+		if (name == NULL || strlen(name) <= 1) {
+			continue;
 		}
-		next =value;
-		value=strsep(&next,"\n");
-		if(next == NULL || memcmp(name, "", 1) == 0) {
-			break;
+		value = strLine;
+		if (value == NULL || strlen(value) <= 1) {
+			continue;
 		}
 		apr_table_set(table, name, value);
-		value=next;
 	}
 }
 
@@ -279,6 +278,7 @@ static void loadStyleVersion(apr_pool_t *pool,CombineConfig *pConfig) {
 
 	apr_status_t rc = apr_stat(&finfo, pConfig->versionFilePath, APR_FINFO_OWNER, pool);
 
+	//FIXME: may be has double openfile and make table, need lock resolve
 	if(APR_SUCCESS == rc && finfo.mtime != lastLoadTime) {
 
 		lastLoadTime = finfo.mtime;
@@ -286,17 +286,27 @@ static void loadStyleVersion(apr_pool_t *pool,CombineConfig *pConfig) {
 		rc = apr_file_open(&fd, pConfig->versionFilePath, APR_READ | APR_BINARY | APR_XTHREAD,
 						   APR_OS_DEFAULT, pool);
 		if(rc != APR_SUCCESS) {
-		 return;
+		 	return;
 		}
-		buffer *versionBuf = buffer_init_size(finfo.size);
-
 		amt = (apr_size_t)finfo.size;
-		rc = apr_file_read(fd, versionBuf->ptr, &amt);
+
+		apr_table_t  *newTable = NULL;
+		char         *versionBuf = apr_pcalloc(pool, amt + 1);
+
+		rc = apr_file_read(fd, versionBuf, &amt);
 		if(rc == APR_SUCCESS) {
-			versionBuf->used = finfo.size;
-			formatParser(styleTable, versionBuf->ptr, versionBuf->used);
+
+			apr_table_t  *oldTable = styleTable;
+
+			newTable = apr_table_make(pool, styleTableSize);
+			formatParser(newTable, versionBuf, strlen(versionBuf));
+
+			styleTable = newTable;
+
+			//free old table
+			if(oldTable != NULL)
+				apr_table_clear(oldTable);
 		}
-		buffer_free(versionBuf);
 	}
 }
 
@@ -656,21 +666,15 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 			addTag(pConfig, ptag->styleType, tmpPosBuf, maxUrlBuf, nversion);
 		} else {
 			//add to linkList
-			StyleLinkList *linkItem = malloc(sizeof(StyleLinkList));
+			StyleLinkList *linkItem = apr_palloc(r->pool, sizeof(StyleLinkList));
 			linkItem->prevItem = NULL;
 
-			buffer *styleUri = buffer_init();
+			buffer *styleUri = apr_palloc(r->pool, sizeof(buffer));
 			styleUri->ptr = singleUri;
 			styleUri->used = singleUriLen;
 			styleUri->size = singleUriLen;
+
 			linkItem->styleUri = styleUri;
-
-			/*
-			linkItem->styleUri = buffer_init_size(maxUrlBuf->used + 1);
-			memcpy(linkItem->styleUri->ptr, maxUrlBuf->ptr, maxUrlBuf->used);
-			linkItem->styleUri->used = maxUrlBuf->used;
-			*/
-
 			linkItem->postion = position;
 			linkItem->version = nversion;
 
@@ -700,15 +704,18 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 		tmpCombine.headBuf = buffer_init();
 		tmpCombine.footerBuf = buffer_init();
 
+		if(!tmpCombine.topBuf || !tmpCombine.headBuf || !tmpCombine.footerBuf) {
+			//app has error now skip this processer
+			return 0;
+		}
+
 		combineStyles(pConfig, cssPtag->styleType, cssLinkList, combinedStyle, &tmpCombine);
-		free_linkedList(cssLinkList);
 		//reset
 		tmpCombine.topBuf->used = 0;
 		tmpCombine.headBuf->used = 0;
 		tmpCombine.footerBuf->used = 0;
 
 		combineStyles(pConfig, jsPtag->styleType, jsLinkList, combinedStyle, &tmpCombine);
-		free_linkedList(jsLinkList);
 		//free
 		combinedStyle_free(&tmpCombine);
 	}
@@ -782,7 +789,7 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 	cssPtag->styleType = 0;
 
 	//create version table
-	styleTable = apr_table_make(p, 5000);
+	styleTable = apr_table_make(p, styleTableSize);
 
 	return pConfig;
 }
@@ -871,7 +878,7 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 		combinedStyle.topBuf = buffer_init();
 		combinedStyle.headBuf = buffer_init();
 		//load version
-//		loadStyleVersion(r->pool, pConfig);
+		loadStyleVersion(r->pool, pConfig);
 
 		buffer *dstBuf = buffer_init_size(ctx->buf->used);
 		if(dstBuf != NULL
