@@ -249,8 +249,7 @@ static void uriSplit(server *srv, connection *con, fileObjectWrapper *fObjectWra
 			if((i + 1) != uriLen) {
 				continue;
 			}
-			maxUriArray[++t] = subUri->ptr[++i];
-			maxUriArray[t] = ZERO_END;
+			maxUriArray[++t] = ZERO_END;
 		}
 		buffer *absFilePath = buffer_init();
 		buffer_prepare_append(absFilePath, docRoot->used + t);

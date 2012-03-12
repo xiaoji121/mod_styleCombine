@@ -230,8 +230,7 @@ time_t getURIVersion(buffer *uri, char *singleUri) {
 			if((i + 1) != uriLen) {
 				continue;
 			}
-			singleUri[++t] = uri->ptr[++i];
-			singleUri[t] = ZERO_END;
+			singleUri[++t] = ZERO_END;
 		}
 		if (NULL == getFileExt(singleUri, t)) {
 			memcpy(singleUri + t, fileExt, fileExtLen);
