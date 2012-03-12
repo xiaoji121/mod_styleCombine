@@ -4,7 +4,6 @@
  *  Created on: Feb 6, 2012
  *      Author: zhiwen
  */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +28,7 @@
 #define MAX_URI_SIZE (DEFAULT_BUF_SIZE * 1024) // 128K
 #define LDLOG_MARK	__FILE__,__LINE__
 #define URI_SEPARATOR "|"
+#define IOBUF_SIZE 10240
 
 const int HASH_DIR_LEN = 11;
 const char ZERO_END = '\0';
@@ -55,8 +55,6 @@ typedef struct {
 
 	buffer *filePath;
 
-	off_t  size;
-
 	struct fileObject *prevItem;
 
 } fileObject;
@@ -72,10 +70,6 @@ typedef struct {
 
 	buffer *contentType;
 
-	off_t totalSize;
-
-	buffer *content;
-
 } fileObjectWrapper;
 
 /**
@@ -85,10 +79,10 @@ static char *getFileExt(char *uri, int len) {
 	if (uri == NULL) {
 		return NULL;
 	}
-	if (0 == memcmp(EXT_JS, uri + len - 3, 3)) {
+	if (0 == memcmp(EXT_JS, uri + (len - 3), 3)) {
 		return EXT_JS;
 	}
-	if (0 == memcmp(EXT_CSS, uri + len - 4, 4)) {
+	if (0 == memcmp(EXT_CSS, uri + (len - 4), 4)) {
 		return EXT_CSS;
 	}
 	return NULL;
@@ -162,7 +156,7 @@ static buffer *createFilePath(server *srv, connection *con, buffer *combineFileD
 	buffer_append_string_len(filePath, DIR_SYMBOL, 1);
 
 	int h = hashcode(subUri->ptr, subUri->used - 1);
-	snprintf(&hashDir, HASH_DIR_LEN, "%d", abs(h) % 800);
+	snprintf(hashDir, HASH_DIR_LEN, "%d", abs(h) % 800);
 	int hashDirLen = strlen(hashDir);
 
 	//create dir ==> /home/admin/combined/js/(1234567)
@@ -194,76 +188,45 @@ static buffer *createFilePath(server *srv, connection *con, buffer *combineFileD
 	return filePath;
 }
 
-/**
- * 将文件内容写目标文件中去
- */
-static int fileWrite(server *srv, connection *con, buffer *filePath, buffer *content) {
+static int fileCombining(server *srv, connection *con, fileObjectWrapper *fObjectWrapper, char *targetFile) {
 
-	if(bufferIsBlank(filePath) || bufferIsBlank(content)) {
+	if (NULL == fObjectWrapper|| NULL == targetFile) {
 		return -1;
 	}
-	int ofd;
-	if(-1 == (ofd = open(filePath->ptr, O_WRONLY|O_CREAT|O_EXCL, 0600))) {
+
+	int ifd, ofd, num;
+	char buf[IOBUF_SIZE];
+	fileObject *fObject = fObjectWrapper->fObject;
+
+	if(-1 == (ofd = open(targetFile, O_WRONLY|O_CREAT|O_EXCL, 0600))) {
 		if(errno == EEXIST) {
 			return 0;//文件没有更新，不需要重新写
 		}
 		if(con->conf.log_file_not_found) {
-			log_error_write(srv, LDLOG_MARK,  "sbss",  "-- fileWrite  ",filePath ," error:", strerror(errno));
+			log_error_write(srv, LDLOG_MARK,  "ssss",  "-- fileWrite  ",targetFile ," error:", strerror(errno));
 		}
 		return -1;
 	}
 
-	/**
-	 * 如果写入磁盘失败/或写入部分，则尝试再进行一次写。
-	 * 如果还没有成功则打印日志，跳过处理
-	 */
-	ssize_t result = write(ofd, content->ptr, content->used);
-	if(result != content->used) {
-		if(result == -1) {
-			++result;
-		}
-		result = write(ofd, content->ptr + result, content->used);
-		if(result != content->used) {
-			log_error_write(srv, LDLOG_MARK,  "sbsbsd",
-					"fileWrite ERRO: uri:",con->uri.path ," filePath:", filePath, " error:", strerror(errno));
-		}
-	}
-	close(ofd);
-
-	if (con->conf.log_request_handling) {
-		log_error_write(srv, LDLOG_MARK,  "sbsd",  "fileWrite:",filePath ," writedBytes:", result);
-	}
-	return result;
-}
-
-static void fileObjectReader(server *srv, connection *con, fileObjectWrapper *fObjectWrapper) {
-
-	if (fObjectWrapper == NULL || fObjectWrapper->content == NULL) {
-		return;
-	}
-	buffer *contBuf = fObjectWrapper->content;
-	fileObject *fObject = fObjectWrapper->fObject;
-
 	for(; fObject != NULL; fObject = fObject->prevItem) {
-		int ifd = open(fObject->filePath->ptr, O_RDONLY, 0600);
-		if (ifd == -1) {
+		if (-1 == (ifd = open(fObject->filePath->ptr, O_RDONLY, 0600))){
 			if (con->conf.log_file_not_found) {
 				log_error_write(srv, LDLOG_MARK, "sbss", "inFilePath ",
 						fObject->filePath, " failed:", strerror(errno));
 			}
 			continue;
 		}
-
-		size_t rCount = read(ifd, contBuf->ptr + contBuf->used, fObject->size);
-		if(rCount == fObject->size) {
-			contBuf->used += rCount;
-		} else {
-			log_error_write(srv, LDLOG_MARK, "sbsdss", "read file",
-					fObject->filePath, "readCount:",rCount, " error:", strerror(errno));
+		while((num = read(ifd, buf, IOBUF_SIZE)) > 0) {
+			if(write(ofd, buf, num) != num) {
+				log_error_write(srv, LDLOG_MARK, "sbssss", "sourceFile ", fObject->filePath,
+						                                   "targetFile:", targetFile,
+						                                   "failed:", strerror(errno));
+			}
 		}
 		close(ifd);
 	}
-	contBuf->ptr[contBuf->used] = ZERO_END;
+	close(ofd);
+	return 1;
 }
 
 static void uriSplit(server *srv, connection *con, fileObjectWrapper *fObjectWrapper, buffer *docRoot) {
@@ -276,23 +239,21 @@ static void uriSplit(server *srv, connection *con, fileObjectWrapper *fObjectWra
 
 	buffer *subUri = con->uri.path;
 	int uriLen = subUri->used - 1;
-	char *fileExt = getFileExt(subUri->ptr, subUri->used);
+	char *fileExt = getFileExt(subUri->ptr, uriLen);
 	int i , t = 0;
-	for(i = 0; i < uriLen; i++) {
+	for(i = 0; i < uriLen; ++i, ++t) {
 		if(i != 0 && memcmp(&subUri->ptr[i], URI_SEPARATOR, 1) == 0) {
 			maxUriArray[t] = ZERO_END;
 		} else {
-			maxUriArray[t++] = subUri->ptr[i];
+			maxUriArray[t] = subUri->ptr[i];
 			if((i + 1) != uriLen) {
 				continue;
 			}
-			maxUriArray[t++] = subUri->ptr[i + 1];
+			maxUriArray[++t] = subUri->ptr[++i];
 			maxUriArray[t] = ZERO_END;
 		}
-
 		buffer *absFilePath = buffer_init();
 		buffer_prepare_append(absFilePath, docRoot->used + t);
-
 		// /home/admin/www_cn/htdocs
 		buffer_append_string_buffer(absFilePath, docRoot);
 		// /js/a.js
@@ -301,11 +262,11 @@ static void uriSplit(server *srv, connection *con, fileObjectWrapper *fObjectWra
 		 * 对于file 有可能是 a.js 或 a 文件名情况进行处理,将没有后缀的添加后缀
 		 * 文件名中有点(.) 就表示有后缀
 		 */
-		if (getFileExt(maxUriArray, t) == NULL) {
+		if (NULL == getFileExt(maxUriArray, t)) {
 			buffer_append_string(absFilePath, fileExt);
 		}
-		// clean value of "t" ready next use;
-		t = 0;
+		// reset value of "t" ready next use;
+		t = -1;
 
 		if (con->conf.log_request_handling) {
 			log_error_write(srv, LDLOG_MARK,  "sb",  "-- subDocRoot", absFilePath);
@@ -322,9 +283,6 @@ static void uriSplit(server *srv, connection *con, fileObjectWrapper *fObjectWra
 		fileObject *fObjectItem = malloc(sizeof(fileObject));
 		fObjectItem->prevItem = NULL;
 		fObjectItem->filePath = absFilePath;
-		fObjectItem->size = sce->st.st_size;
-		fObjectWrapper->totalSize += sce->st.st_size;
-
 		if(firstItem == NULL) {
 			firstItem = fObjectItem;
 			fObjectWrapper->contentType = sce->content_type;
@@ -332,12 +290,10 @@ static void uriSplit(server *srv, connection *con, fileObjectWrapper *fObjectWra
 			prevItem->prevItem = fObjectItem;
 		}
 		prevItem = fObjectItem;
-
 		if (lastModified < sce->st.st_mtime) {
 			lastModified = sce->st.st_mtime;
 		}
 	}
-
 	if(lastModified == 0) {
 		time(&lastModified);
 	}
@@ -434,11 +390,9 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 		buffer_copy_string_buffer(tmpDocRoot, con->conf.document_root);
 	}
 	fileObjectWrapper fObjectWrapper;
-	fObjectWrapper.content = NULL;
 	fObjectWrapper.contentType = NULL;
 	fObjectWrapper.fObject = NULL;
 	fObjectWrapper.lastModified = 0;
-	fObjectWrapper.totalSize = 0;
 
 	uriSplit(srv, con, &fObjectWrapper, tmpDocRoot);
 
@@ -478,21 +432,12 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 		combinedMtime = sce->st.st_mtime;
 	}
 	if(combinedMtime != fObjectWrapper.lastModified) {
-		buffer *contBuf = buffer_init();
-		contBuf->used = 0;
-		contBuf->size = fObjectWrapper.totalSize + 1;
-		contBuf->ptr = malloc(contBuf->size);
-		//从文件中读取内容
-		fObjectWrapper.content = contBuf;
-
-		fileObjectReader(srv, con, &fObjectWrapper);
-		//将合并好的文件内容写入磁盘
-		int wc = fileWrite(srv, con, combinedFullPath, fObjectWrapper.content);
 		/**
 		 * 将新合并后的文件最后修改时间，变更成当前文件的最后修改时间。
 		 * 同时写到head的last_modified中，用户其它模块生成Etag或修改时间比较保持统一。
 		 */
-		if(wc > 0) {
+		if(fileCombining(srv, con, &fObjectWrapper, combinedFullPath->ptr) > 0) {
+			//update file modtime
 			struct utimbuf newFileTime;
 			newFileTime.modtime = fObjectWrapper.lastModified;
 			utime(combinedFullPath->ptr, &newFileTime);
@@ -525,14 +470,13 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 	buffer_free(tmpDocRoot);
 	buffer_free(filePath);
 	buffer_free(combinedFullPath);
-	buffer_free(fObjectWrapper.content);
 
 	fileObject *freeObject = fObjectWrapper.fObject;
 	while (freeObject != NULL) {
-		fileObject *freeObjectTmp = freeObject;
-		buffer_free(freeObjectTmp->filePath);
-		free(freeObjectTmp);
+		fileObject *tmpFreeObject = freeObject;
+		buffer_free(tmpFreeObject->filePath);
 		freeObject = freeObject->prevItem;
+		free(tmpFreeObject);
 	}
 	return HANDLER_GO_ON;
 }
