@@ -21,9 +21,11 @@
 #include "stat_cache.h"
 #include "md5.h"
 
-#define EXT_JS  ".js"
-#define EXT_CSS  ".css"
-#define DIR_SYMBOL  "/"
+#define EXT_JS     ".js"
+#define EXT_CSS    ".css"
+#define DIR_SYMBOL "/"
+#define JS_OUT     "js_out"
+#define CSS_OUT     "css_out"
 #define DEFAULT_BUF_SIZE 128
 #define MAX_URI_SIZE (DEFAULT_BUF_SIZE * 1024) // 128K
 #define LDLOG_MARK	__FILE__,__LINE__
@@ -143,16 +145,24 @@ static buffer *createFilePath(server *srv, connection *con, buffer *combineFileD
 	unsigned char md[16];
 	char hashDir[HASH_DIR_LEN];
 	buffer *subUri = con->uri.path;
-	//如果uri 中不包含 .js/.css 则不进行处理
-	char *fileExt = getFileExt(subUri->ptr, subUri->used - 1);
-	char *fileExtDir = fileExt;
-	int fileExtDirLen = strlen(++fileExtDir);
 
 	buffer *filePath = buffer_init();
 	buffer_prepare_append(filePath, 40);
 
+	int subUriLen = subUri->used - 1;
+	char *fileExt = NULL;
+	int fileExtLen = 0;
+
 	buffer_append_string_len(filePath, DIR_SYMBOL, 1);
-	buffer_append_string_len(filePath, fileExtDir, fileExtDirLen);
+	if (0 == memcmp(EXT_JS, subUri->ptr + (subUriLen - 3), 3)) {
+		fileExt = EXT_JS;
+		fileExtLen = 3;
+		buffer_append_string_len(filePath, JS_OUT, 6);
+	} else if (0 == memcmp(EXT_CSS, subUri->ptr + (subUriLen - 4), 4)) {
+		fileExt = EXT_CSS;
+		fileExtLen = 4;
+		buffer_append_string_len(filePath, CSS_OUT, 7);
+	}
 	buffer_append_string_len(filePath, DIR_SYMBOL, 1);
 
 	int h = hashcode(subUri->ptr, subUri->used - 1);
@@ -518,7 +528,7 @@ SETDEFAULTS_FUNC(mod_styleUriSplit_set_defaults) {
 			//创建js合并后的临时文件 /home/zhiwen/output/combo/style/js
 			buffer *js_dir = buffer_init_buffer(s->combineFileDir);
 			buffer_append_string(js_dir, DIR_SYMBOL);
-			buffer_append_string(js_dir, "js_out");
+			buffer_append_string(js_dir, JS_OUT);
 
 			if(-1 == mkdir(js_dir->ptr, 0700)) {
 				if (errno != EEXIST) {
@@ -531,7 +541,7 @@ SETDEFAULTS_FUNC(mod_styleUriSplit_set_defaults) {
 			//创建css合并后的临时文件 /home/zhiwen/output/combo/style/css
 			buffer *css_dir = buffer_init_buffer(s->combineFileDir);
 			buffer_append_string(css_dir, DIR_SYMBOL);
-			buffer_append_string(css_dir, "css_out");
+			buffer_append_string(css_dir, CSS_OUT);
 
 			if(-1 == mkdir(css_dir->ptr, 0700)) {
 				if (errno != EEXIST) {
