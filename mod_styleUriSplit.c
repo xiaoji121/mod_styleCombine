@@ -531,7 +531,7 @@ SETDEFAULTS_FUNC(mod_styleUriSplit_set_defaults) {
 			//创建css合并后的临时文件 /home/zhiwen/output/combo/style/css
 			buffer *css_dir = buffer_init_buffer(s->combineFileDir);
 			buffer_append_string(css_dir, DIR_SYMBOL);
-			buffer_append_string(css_dir, "js_out");
+			buffer_append_string(css_dir, "css_out");
 
 			if(-1 == mkdir(css_dir->ptr, 0700)) {
 				if (errno != EEXIST) {
