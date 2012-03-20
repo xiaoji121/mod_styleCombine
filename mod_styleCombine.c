@@ -761,6 +761,9 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 
 	CombineConfig *pConfig = apr_palloc(p, sizeof(CombineConfig));
+	if(NULL == pConfig) {
+		return NULL;
+	}
 	pConfig->enabled = 0;
 	pConfig->filterCntType = NULL;
 	/**
@@ -768,24 +771,39 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 	 * default len for ie 2083 char
 	 */
 	pConfig->maxUrlLen = 2083;
-
 	pConfig->domain = apr_palloc(p, sizeof(buffer));
-
+	if(NULL == pConfig->domain) {
+		return NULL;
+	}
 	jsPtag = apr_palloc(p, sizeof(ParserTag));
+	if(NULL == jsPtag) {
+		return NULL;
+	}
 	cssPtag = apr_palloc(p, sizeof(ParserTag));
-
+	if(NULL == cssPtag) {
+		return NULL;
+	}
 	// js config
 	buffer *jsPrefix = apr_palloc(p, sizeof(buffer));
+	if(NULL == jsPrefix) {
+		return NULL;
+	}
 	jsPrefix->ptr = "<script";
 	jsPrefix->used = strlen(jsPrefix->ptr);
 	jsPrefix->size = jsPrefix->used;
 
 	buffer *jsCloseTag  = apr_palloc(p, sizeof(buffer));
+	if(NULL == jsCloseTag) {
+		return NULL;
+	}
 	jsCloseTag->ptr = "</script>";
 	jsCloseTag->used = strlen(jsCloseTag->ptr);
 	jsCloseTag->size = jsCloseTag->used;
 
 	buffer *jsMark  = apr_palloc(p, sizeof(buffer));
+	if(NULL == jsMark) {
+		return NULL;
+	}
 	jsMark->ptr = "src";
 	jsMark->used = strlen(jsMark->ptr);
 	jsMark->size = jsMark->used;
@@ -798,16 +816,25 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 
 	//css config
 	buffer *cssPrefix = apr_palloc(p, sizeof(buffer));
+	if(NULL == cssPrefix) {
+		return NULL;
+	}
 	cssPrefix->ptr = "<link";
 	cssPrefix->used = strlen(cssPrefix->ptr);
 	cssPrefix->size = cssPrefix->used;
 
 	buffer *cssCloseTag  = apr_palloc(p, sizeof(buffer));
+	if(NULL == cssCloseTag) {
+		return NULL;
+	}
 	cssCloseTag->ptr = ">";
 	cssCloseTag->used = strlen(cssCloseTag->ptr);
 	cssCloseTag->size = cssCloseTag->used;
 
 	buffer *cssMark  = apr_palloc(p, sizeof(buffer));
+	if(NULL == cssMark) {
+		return NULL;
+	}
 	cssMark->ptr = "stylesheet";
 	cssMark->used = strlen(cssMark->ptr);
 	cssMark->size = cssMark->used;
