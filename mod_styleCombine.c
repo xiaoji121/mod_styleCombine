@@ -188,7 +188,7 @@ static void stringAppend(buffer *buf, char *str, int strLen) {
 }
 
 static void formatParser(apr_table_t *table, char *str) {
-	if (NULL == str) {
+	if (NULL == str || NULL == table) {
 		return;
 	}
 	char *name = NULL, *value = NULL;
@@ -210,7 +210,9 @@ static void formatParser(apr_table_t *table, char *str) {
 }
 
 time_t getURIVersion(buffer *uri, char *singleUri) {
-
+	if(NULL == uri || NULL == singleUri) {
+		return 0;
+	}
 	time_t lastModified = 0;
 	time_t newVersion = 0;
 
@@ -263,14 +265,17 @@ static char strToPosition(char *str) {
 	if (0 == strncmp(POSITION_HEAD, str, 4)) {
 		return 'h';
 	}
-	if (0 == memcmp(POSITION_FOOTER, str, 6)) {
+	if (0 == strncmp(POSITION_FOOTER, str, 6)) {
 		return 'f';
 	}
 	return ' ';
 }
 
-static void loadStyleVersion(apr_pool_t *pool,CombineConfig *pConfig) {
+static void loadStyleVersion(apr_pool_t *pool, CombineConfig *pConfig) {
 
+	if(NULL == pConfig) {
+		return;
+	}
 	apr_finfo_t finfo;
 	apr_file_t *fd = NULL;
 	apr_size_t amt;
@@ -283,7 +288,7 @@ static void loadStyleVersion(apr_pool_t *pool,CombineConfig *pConfig) {
 	prevTime = tv.tv_sec;
 
 	apr_status_t rc = apr_stat(&finfo, pConfig->versionFilePath, APR_FINFO_OWNER, pool);
-	//FIXME: may be has double openfile and make table, need lock resolve
+
 	if(APR_SUCCESS == rc && finfo.mtime != lastLoadTime) {
 		lastLoadTime = finfo.mtime;
 		rc = apr_file_open(&fd, pConfig->versionFilePath, APR_READ | APR_BINARY | APR_XTHREAD,
@@ -305,7 +310,7 @@ static void loadStyleVersion(apr_pool_t *pool,CombineConfig *pConfig) {
 			formatParser(newTable, versionBuf);
 			styleTable = newTable;
 			//free old table
-			if(NULL == oldTable) {
+			if(NULL != oldTable) {
 				apr_table_clear(oldTable);
 			}
 		}
@@ -314,6 +319,11 @@ static void loadStyleVersion(apr_pool_t *pool,CombineConfig *pConfig) {
 }
 
 static int tagFilter(CombineConfig *pConfig, ParserTag *ptag, char *tagBuf, buffer *uriBuf) {
+
+	if(NULL == pConfig || NULL == ptag || NULL == tagBuf || NULL == uriBuf) {
+		return 0;
+	}
+
 	if (NULL == strstr(tagBuf, ptag->mark->ptr)) {
 		//表示是一个非 css / javascript 文件引用，则跳过处理
 		return 0;
@@ -325,11 +335,12 @@ static int tagFilter(CombineConfig *pConfig, ParserTag *ptag, char *tagBuf, buff
 		return 0;
 	}
 	curURLDomain += pConfig->domain->used;
-	int i = 0, hasDo = 0;
-	char tmpChr;
+	register int i = 0, hasDo = 0;
+	register char tmpChr;
 	for (; (tmpChr = curURLDomain[i]) != ptag->suffix
 			&& tmpChr != '\"'
-			&& tmpChr != '\'' && (i < pConfig->maxUrlLen); i++) {
+			&& tmpChr != '\''
+			&& (i < pConfig->maxUrlLen); i++) {
 		uriBuf->ptr[i] = tmpChr;
 		if ('.' == tmpChr) {
 			++hasDo;
@@ -345,7 +356,7 @@ static int tagFilter(CombineConfig *pConfig, ParserTag *ptag, char *tagBuf, buff
 }
 
 static void addTag(CombineConfig *pConfig, int styleType, buffer *destBuf, buffer *uri, time_t version) {
-	if(NULL == uri || !uri->used) {
+	if(NULL == destBuf || NULL == uri || !uri->used) {
 		return ;
 	}
 
