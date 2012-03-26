@@ -35,7 +35,7 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 #define POSITION_TOP "top"
 #define POSITION_HEAD "head"
 #define POSITION_FOOTER "footer"
-
+#define DEBUG_MODE "debugMode=1"
 #define JS_PREFIX_TXT "<script type=\"text/javascript\" src=\""
 #define JS_SUFFIX_TXT "\"></script>"
 #define CSS_PREFIX_TXT "<link rel=\"stylesheet\" href=\""
@@ -44,6 +44,26 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 #define URI_VERSION_LEN  20
 #define DEFAULT_BUF_SIZE 128
 #define DEFAULT_CONTENT_LEN (1024 << 10)// default html content size 1M
+
+int JS_PREFIX_TXT_LEN = 0;
+int JS_SUFFIX_TXT_LEN = 0;
+int CSS_PREFIX_TXT_LEN = 0;
+int CSS_SUFFIX_TXT_LEN = 0;
+
+/***********global variable************/
+const char ZERO_END = '\0';
+/*position char */
+const char pf = 'f'; //footer
+const char pt = 't'; //top
+const char ph = 'h'; //head
+int styleTableSize = 20000;
+
+volatile apr_pool_t   *globalPool = NULL;
+volatile apr_table_t  *styleTable = NULL;
+volatile apr_time_t    lastLoadTime;
+volatile __time_t      prevTime = 0;
+
+
 
 typedef struct {
 	char *ptr;
@@ -60,20 +80,8 @@ typedef struct {
 	char    styleType;
 } ParserTag;
 
-/***********global variable************/
-const char ZERO_END = '\0';
-/*position char */
-const char pf = 'f'; //footer
-const char pt = 't'; //top
-const char ph = 'h'; //head
-int styleTableSize = 10000;
-
 ParserTag             *cssPtag;
 ParserTag             *jsPtag;
-volatile apr_table_t  *styleTable;
-volatile apr_time_t    lastLoadTime;
-volatile __time_t      prevTime = 0;
-
 
 typedef struct {
 	int        enabled;
@@ -81,6 +89,7 @@ typedef struct {
 	buffer    *domain;
 	char      *versionFilePath;
 	int        maxUrlLen;
+	int        debugMode;
 
 	//style combined auto not impl yet
 //	int        delBlankSpace;
@@ -271,25 +280,32 @@ static char strToPosition(char *str) {
 	return ' ';
 }
 
-static void loadStyleVersion(apr_pool_t *pool, CombineConfig *pConfig) {
+static void loadStyleVersion(request_rec *r, CombineConfig *pConfig) {
 
 	if(NULL == pConfig) {
 		return;
 	}
+	apr_pool_t *pool = r->pool;
 	apr_finfo_t finfo;
 	apr_file_t *fd = NULL;
 	apr_size_t amt;
 	int intervalSecd = 20;
 	struct timeval tv;
+	if(NULL == pConfig->versionFilePath) {
+		return;
+	}
 	gettimeofday(&tv, NULL);
 	if(0 != prevTime && (tv.tv_sec - prevTime) <= intervalSecd) {
 		return;
 	}
 	prevTime = tv.tv_sec;
-
-	apr_status_t rc = apr_stat(&finfo, pConfig->versionFilePath, APR_FINFO_OWNER, pool);
+	apr_status_t rc = apr_stat(&finfo, pConfig->versionFilePath, APR_FINFO_MIN, pool);
 
 	if(APR_SUCCESS == rc && finfo.mtime != lastLoadTime) {
+		if(pConfig->debugMode) {
+			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
+					"==reload styleVersion File lastLoadTime: %ld == fmtime:%ld", lastLoadTime, finfo.mtime);
+		}
 		lastLoadTime = finfo.mtime;
 		rc = apr_file_open(&fd, pConfig->versionFilePath, APR_READ | APR_BINARY | APR_XTHREAD,
 						   APR_OS_DEFAULT, pool);
@@ -305,30 +321,36 @@ static void loadStyleVersion(apr_pool_t *pool, CombineConfig *pConfig) {
 		}
 		rc = apr_file_read(fd, versionBuf, &amt);
 		if(APR_SUCCESS == rc) {
-			apr_table_t  *oldTable = styleTable;
-			newTable = apr_table_make(pool, styleTableSize);
+
+			apr_pool_t *newPool = NULL;
+			apr_pool_create(&newPool, r->server->process->pool);
+			if(NULL == newPool) {
+				return ;
+			}
+			newTable = apr_table_make(newPool, styleTableSize);
 			formatParser(newTable, versionBuf);
 			styleTable = newTable;
-			//free old table
-			if(NULL != oldTable) {
-				apr_table_clear(oldTable);
+
+			apr_pool_t *oldPool = globalPool;
+			globalPool = newPool;
+			//free old pool
+			if(NULL != oldPool) {
+				apr_pool_destroy(oldPool);
 			}
 		}
+		apr_file_close(fd);
 	}
 	return;
 }
 
 static int tagFilter(CombineConfig *pConfig, ParserTag *ptag, char *tagBuf, buffer *uriBuf) {
-
 	if(NULL == pConfig || NULL == ptag || NULL == tagBuf || NULL == uriBuf) {
 		return 0;
 	}
-
 	if (NULL == strstr(tagBuf, ptag->mark->ptr)) {
 		//表示是一个非 css / javascript 文件引用，则跳过处理
 		return 0;
 	}
-
 	char *curURLDomain = strstr(tagBuf, pConfig->domain->ptr);
 	if (NULL == curURLDomain) {
 		//对于没有域名的css/js不进行处理
@@ -361,9 +383,9 @@ static void addTag(CombineConfig *pConfig, int styleType, buffer *destBuf, buffe
 	}
 
 	if (0 == styleType) {
-		stringAppend(destBuf, CSS_PREFIX_TXT, strlen(CSS_PREFIX_TXT));
+		stringAppend(destBuf, CSS_PREFIX_TXT, CSS_PREFIX_TXT_LEN);
 	} else {
-		stringAppend(destBuf, JS_PREFIX_TXT, strlen(JS_PREFIX_TXT));
+		stringAppend(destBuf, JS_PREFIX_TXT, JS_PREFIX_TXT_LEN);
 	}
 	stringAppend(destBuf, pConfig->domain->ptr, pConfig->domain->used);
 	stringAppend(destBuf, uri->ptr, uri->used);
@@ -375,10 +397,10 @@ static void addTag(CombineConfig *pConfig, int styleType, buffer *destBuf, buffe
 
 	if (0 == styleType) {
 		stringAppend(destBuf, EXT_CSS, 4);
-		stringAppend(destBuf, CSS_SUFFIX_TXT, strlen(CSS_SUFFIX_TXT));
+		stringAppend(destBuf, CSS_SUFFIX_TXT, CSS_SUFFIX_TXT_LEN);
 	} else {
 		stringAppend(destBuf, EXT_JS, 3);
-		stringAppend(destBuf, JS_SUFFIX_TXT, strlen(JS_SUFFIX_TXT));
+		stringAppend(destBuf, JS_SUFFIX_TXT, JS_SUFFIX_TXT_LEN);
 	}
 	destBuf->ptr[destBuf->used] = ZERO_END;
 	return;
@@ -764,7 +786,13 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 	if(NULL == pConfig) {
 		return NULL;
 	}
+	JS_PREFIX_TXT_LEN = strlen(JS_PREFIX_TXT);
+	JS_SUFFIX_TXT_LEN = strlen(JS_SUFFIX_TXT);
+	CSS_PREFIX_TXT_LEN = strlen(CSS_PREFIX_TXT);
+	CSS_SUFFIX_TXT_LEN = strlen(CSS_SUFFIX_TXT);
+
 	pConfig->enabled = 0;
+	pConfig->debugMode = 0;
 	pConfig->filterCntType = NULL;
 	/**
 	 * see http://support.microsoft.com/kb/208427/EN-US
@@ -844,10 +872,6 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 	cssPtag->suffix = '>';
 	cssPtag->closeTag = cssCloseTag;
 	cssPtag->styleType = 0;
-
-	//create version table
-	styleTable = apr_table_make(p, styleTableSize);
-
 	return pConfig;
 }
 
@@ -866,6 +890,14 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 	request_rec *r      = f->r;
 	conn_rec *c         = r->connection;
 	CombineCtx *ctx     = f->ctx;
+
+	if(NULL != r->parsed_uri.query) {
+		char *debugMode = strstr(r->parsed_uri.query, DEBUG_MODE);
+		if(NULL != debugMode) {
+			return ap_pass_brigade(f->next, pbbIn);
+		}
+	}
+
 	CombineConfig *pConfig = NULL;
 	pConfig = ap_get_module_config(r->server->module_config, &styleCombine_module);
 
@@ -877,6 +909,9 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 		return ap_pass_brigade(f->next, pbbIn);
 	}
 	if(NULL != apr_table_get(r->notes, STYLE_COMBINE_NAME)) {
+		return ap_pass_brigade(f->next, pbbIn);
+	}
+	if(NULL == pConfig) {
 		return ap_pass_brigade(f->next, pbbIn);
 	}
 	if(r->content_type && r->content_type[0]) {
@@ -933,6 +968,11 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 	if(!isEOS) {
 		return OK;
 	}
+	if(pConfig->debugMode) {
+		time_t start = 0;
+		time(&start);
+		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "======styleCombine process: %s == %ld", r->uri, start);
+	}
 	if(ctx->buf->used > 0) {
 		ctx->buf->ptr[ctx->buf->used] = ZERO_END;
 
@@ -941,7 +981,7 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 		combinedStyle.topBuf = buffer_init();
 		combinedStyle.headBuf = buffer_init();
 		//load version
-		loadStyleVersion(r->pool, pConfig);
+		loadStyleVersion(r, pConfig);
 
 		buffer *dstBuf = buffer_init_size(ctx->buf->used);
 		if(dstBuf && combinedStyle.footerBuf && combinedStyle.topBuf && combinedStyle.headBuf) {
@@ -962,8 +1002,13 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 	}
 	apr_table_get(r->notes, "ok");
 	buffer_free(ctx->buf);
-
 	apr_brigade_cleanup(pbbIn);
+
+	if(pConfig->debugMode) {
+		time_t end = 0;
+		time(&end);
+		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "========styleCombine end: %s == %ld", r->uri, end);
+	}
 	return ap_pass_brigade(f->next, ctx->pbbOut);
 }
 
@@ -1006,6 +1051,12 @@ static const char *setMaxUrlLen(cmd_parms *cmd, void *dummy, const char *arg) {
 	return NULL;
 }
 
+static const char *setDebugMode(cmd_parms *cmd, void *dummy, int arg) {
+	CombineConfig *pConfig = ap_get_module_config(cmd->server->module_config, &styleCombine_module);
+	pConfig->debugMode = arg;
+	return NULL;
+}
+
 static const char *setVersionFilePath(cmd_parms *cmd, void *dummy, const char *arg) {
 	CombineConfig *pConfig = ap_get_module_config(cmd->server->module_config, &styleCombine_module);
 	if(NULL != arg) {
@@ -1025,6 +1076,8 @@ static const command_rec styleCombineCmds[] =
 		AP_INIT_TAKE1("domain", setDomain, NULL, OR_ALL, "style version domain url"),
 
 		AP_INIT_TAKE1("maxUrlLen", setMaxUrlLen, NULL, OR_ALL, "url max len"),
+
+		AP_INIT_TAKE1("debugMode", setDebugMode, NULL, OR_ALL, " debug mode"),
 
 		// part version command
 		AP_INIT_TAKE1("versionFilePath", setVersionFilePath, NULL, OR_ALL, "style versionFilePath dir"),
