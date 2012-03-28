@@ -32,7 +32,6 @@
 #define URI_SEPARATOR "|"
 #define IOBUF_SIZE 10240
 
-const int HASH_DIR_LEN = 11;
 const char ZERO_END = '\0';
 
 typedef struct {
@@ -139,11 +138,12 @@ static inline int hashcode(const char *str, register int size) {
  * /js/(hashcode)/(md5_string)_(lastModified).js
  * /css/(hashcode)/(md5_string)_(lastModified).css
  */
-static buffer *createFilePath(server *srv, connection *con, buffer *combineFileDir, long lastModified) {
+static buffer *createFilePath(server *srv, connection *con, long lastModified) {
+
+	UNUSED(srv);
 
 	MD5_CTX ctx;
 	unsigned char md[16];
-	char hashDir[HASH_DIR_LEN];
 	buffer *subUri = con->uri.path;
 
 	buffer *filePath = buffer_init();
@@ -166,32 +166,17 @@ static buffer *createFilePath(server *srv, connection *con, buffer *combineFileD
 	buffer_append_string_len(filePath, DIR_SYMBOL, 1);
 
 	int h = hashcode(subUri->ptr, subUri->used - 1);
-	snprintf(hashDir, HASH_DIR_LEN, "%d", abs(h) % 800);
-	int hashDirLen = strlen(hashDir);
-
-	//create dir ==> /home/admin/combined/js/(1234567)
-	int tmpDirLen = filePath->used - 1 + hashDirLen;
-	buffer_append_string_buffer(combineFileDir, filePath);
-	buffer_append_string_len(combineFileDir, hashDir, hashDirLen);
-
-	int mkdirResult = mkdir(combineFileDir->ptr, 0700);
-	if((-1 == mkdirResult) && (errno != EEXIST)) {
-		log_error_write(srv, LDLOG_MARK, "sbss", "hashDir create", combineFileDir, "failed", strerror(errno));
-	} else {
-		buffer_append_string_len(filePath, hashDir, hashDirLen);
-		buffer_append_string_len(filePath, DIR_SYMBOL, 1);
-	}
-	combineFileDir->used -= tmpDirLen;
-	combineFileDir->ptr[combineFileDir->used] = ZERO_END;
 
 	// md5 string append
 	MD5_Init(&ctx);
 	MD5_Update(&ctx, (unsigned char *)subUri->ptr, subUri->used - 1);
 	MD5_Final(md, &ctx);
 
-	// /home/admin/combined/js/(hash)/(md5_hex)_(lastmodified).(js|css)
+	// /home/admin/combined/js/(md5_hex)_(hash)_(lastmodified).(js|css)
 	buffer_append_string_encoded(filePath, (char *)md, sizeof(md), ENCODING_HEX);
-	buffer_append_string(filePath, "_");
+	buffer_append_string_len(filePath, "_", 1);
+	buffer_append_off_t(filePath, abs(h));
+	buffer_append_string_len(filePath, "_", 1);
 	buffer_append_long(filePath, lastModified);
 	buffer_append_string(filePath, fileExt);
 
@@ -210,7 +195,8 @@ static int fileCombining(server *srv, connection *con, fileObjectWrapper *fObjec
 
 	if(-1 == (ofd = open(targetFile, O_WRONLY|O_CREAT|O_EXCL, 0600))) {
 		if(errno == EEXIST) {
-			return 0;//文件没有更新，不需要重新写
+			//表示此文件已经有线程在进行写操作了。不需要进行重复的写
+			return 0;
 		}
 		if(con->conf.log_file_not_found) {
 			log_error_write(srv, LDLOG_MARK,  "ssss",  "-- fileWrite  ",targetFile ," error:", strerror(errno));
@@ -423,8 +409,8 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 		return HANDLER_FINISHED;
 	}
 
-	//生成文件路径 /js/1234567890/11FEACC60EA04365DFA69F638BDEA6A4_1326706093.js
-	buffer *filePath = createFilePath(srv, con, combineFileDir, fObjectWrapper.lastModified);
+	//生成文件路径 /js_out/1234567890/11FEACC60EA04365DFA69F638BDEA6A4_1326706093.js
+	buffer *filePath = createFilePath(srv, con, fObjectWrapper.lastModified);
 
 	buffer *combinedFullPath = buffer_init();
 	buffer_prepare_append(combinedFullPath, combineFileDir->used + DEFAULT_BUF_SIZE);
@@ -441,12 +427,12 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 		combinedMtime = sce->st.st_mtime;
 	}
 	if(combinedMtime != fObjectWrapper.lastModified) {
-		/**
-		 * 将新合并后的文件最后修改时间，变更成当前文件的最后修改时间。
-		 * 同时写到head的last_modified中，用户其它模块生成Etag或修改时间比较保持统一。
-		 */
-		if(fileCombining(srv, con, &fObjectWrapper, combinedFullPath->ptr) > 0) {
-			//update file modtime
+		int combinResult = fileCombining(srv, con, &fObjectWrapper, combinedFullPath->ptr);
+		if(1 == combinResult) {
+			/**
+			 * 将新合并后的文件最后修改时间，变更成当前文件的最后修改时间。
+			 * 同时写到head的last_modified中，用户其它模块生成Etag或修改时间比较保持统一。
+			 */
 			struct utimbuf newFileTime;
 			newFileTime.modtime = fObjectWrapper.lastModified;
 			utime(combinedFullPath->ptr, &newFileTime);
@@ -522,7 +508,7 @@ SETDEFAULTS_FUNC(mod_styleUriSplit_set_defaults) {
 		if (!bufferIsBlank(s->combineFileDir)) {
 			struct stat st;
 			if (0 != stat(s->combineFileDir->ptr, &st)) {
-				log_error_write(srv, LDLOG_MARK, "sbs", "can't stat combo.file-dir", s->combineFileDir, strerror(errno));
+				log_error_write(srv, LDLOG_MARK, "sbs", "can't stat styleUriSplit.combine-fileDir", s->combineFileDir, strerror(errno));
 				return HANDLER_ERROR;
 			}
 			//创建js合并后的临时文件 /home/zhiwen/output/combo/style/js
