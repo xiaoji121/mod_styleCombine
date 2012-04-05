@@ -176,6 +176,7 @@ static buffer *createFilePath(server *srv, connection *con, long lastModified) {
 	buffer_append_string_encoded(filePath, (char *)md, sizeof(md), ENCODING_HEX);
 	buffer_append_string_len(filePath, "_", 1);
 	buffer_append_off_t(filePath, abs(h));
+	buffer_append_off_t(filePath, subUri->used - 1);
 	buffer_append_string_len(filePath, "_", 1);
 	buffer_append_long(filePath, lastModified);
 	buffer_append_string(filePath, fileExt);
@@ -235,7 +236,6 @@ static void uriSplit(server *srv, connection *con, fileObjectWrapper *fObjectWra
 
 	buffer *subUri = con->uri.path;
 	int uriLen = subUri->used - 1;
-	char *fileExt = getFileExt(subUri->ptr, uriLen);
 	int i , t = 0;
 	for(i = 0; i < uriLen; ++i, ++t) {
 		if(i != 0 && memcmp(&subUri->ptr[i], URI_SEPARATOR, 1) == 0) {
@@ -253,13 +253,6 @@ static void uriSplit(server *srv, connection *con, fileObjectWrapper *fObjectWra
 		buffer_append_string_buffer(absFilePath, docRoot);
 		// /js/a.js
 		buffer_append_string(absFilePath, maxUriArray);
-		/**
-		 * 对于file 有可能是 a.js 或 a 文件名情况进行处理,将没有后缀的添加后缀
-		 * 文件名中有点(.) 就表示有后缀
-		 */
-		if (NULL == getFileExt(maxUriArray, t)) {
-			buffer_append_string(absFilePath, fileExt);
-		}
 		// reset value of "t" ready next use;
 		t = -1;
 
@@ -409,7 +402,7 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 		return HANDLER_FINISHED;
 	}
 
-	//生成文件路径 /js_out/1234567890/11FEACC60EA04365DFA69F638BDEA6A4_1326706093.js
+	//生成文件路径 /js_out/11FEACC60EA04365DFA69F638BDEA6A4_12345678901326706093.js
 	buffer *filePath = createFilePath(srv, con, fObjectWrapper.lastModified);
 
 	buffer *combinedFullPath = buffer_init();
@@ -426,6 +419,7 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 	if(HANDLER_ERROR != stat_cache_get_entry(srv, con, combinedFullPath, &sce)) {
 		combinedMtime = sce->st.st_mtime;
 	}
+	//FIXME: use file lock
 	if(combinedMtime != fObjectWrapper.lastModified) {
 		int combinResult = fileCombining(srv, con, &fObjectWrapper, combinedFullPath->ptr);
 		if(1 == combinResult) {
@@ -440,6 +434,15 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 			mtime = strftime_cache_get(srv, fObjectWrapper.lastModified);
 			response_header_overwrite(srv, con, CONST_STR_LEN("Content-Type"), CONST_BUF_LEN(fObjectWrapper.contentType));
 			response_header_overwrite(srv, con, CONST_STR_LEN("Last-Modified"), CONST_BUF_LEN(mtime));
+		}
+		if(0 == combinResult) {
+			/**
+			 * if file combine not finished then wait 1 second
+			 */
+			sleep(1);
+			if (con->conf.log_timeouts) {
+				log_error_write(srv, LDLOG_MARK,  "sb",  "--fileCombining sleep", combinedFullPath);
+			}
 		}
 	}
 
