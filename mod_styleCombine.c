@@ -86,7 +86,8 @@ ParserTag             *jsPtag;
 typedef struct {
 	int        enabled;
 	char      *filterCntType;
-	buffer    *domain;
+	buffer    *oldDomain;
+	buffer    *newDomain;
 	char      *versionFilePath;
 	int        maxUrlLen;
 	int        debugMode;
@@ -351,12 +352,12 @@ static int tagFilter(CombineConfig *pConfig, ParserTag *ptag, char *tagBuf, buff
 		//表示是一个非 css / javascript 文件引用，则跳过处理
 		return 0;
 	}
-	char *curURLDomain = strstr(tagBuf, pConfig->domain->ptr);
+	char *curURLDomain = strstr(tagBuf, pConfig->oldDomain->ptr);
 	if (NULL == curURLDomain) {
 		//对于没有域名的css/js不进行处理
 		return 0;
 	}
-	curURLDomain += pConfig->domain->used;
+	curURLDomain += pConfig->oldDomain->used;
 	register int i = 0, hasDo = 0;
 	register char tmpChr;
 	for (; (tmpChr = curURLDomain[i]) != ptag->suffix
@@ -387,7 +388,7 @@ static void addTag(CombineConfig *pConfig, int styleType, buffer *destBuf, buffe
 	} else {
 		stringAppend(destBuf, JS_PREFIX_TXT, JS_PREFIX_TXT_LEN);
 	}
-	stringAppend(destBuf, pConfig->domain->ptr, pConfig->domain->used);
+	stringAppend(destBuf, pConfig->newDomain->ptr, pConfig->newDomain->used);
 	stringAppend(destBuf, uri->ptr, uri->used);
 	stringAppend(destBuf, URI_QUERY_PARAM, 4);
 
@@ -799,8 +800,12 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 	 * default len for ie 2083 char
 	 */
 	pConfig->maxUrlLen = 2083;
-	pConfig->domain = apr_palloc(p, sizeof(buffer));
-	if(NULL == pConfig->domain) {
+	pConfig->oldDomain = apr_palloc(p, sizeof(buffer));
+	if(NULL == pConfig->oldDomain) {
+		return NULL;
+	}
+	pConfig->newDomain = apr_palloc(p, sizeof(buffer));
+	if(NULL == pConfig->newDomain) {
 		return NULL;
 	}
 	jsPtag = apr_palloc(p, sizeof(ParserTag));
@@ -1028,14 +1033,26 @@ static const char *setFilterCntType(cmd_parms *cmd, void *dummy, const char *arg
 	return NULL;
 }
 
-static const char *setDomain(cmd_parms *cmd, void *dummy, const char *arg) {
+static const char *setOldDomain(cmd_parms *cmd, void *dummy, const char *arg) {
 	CombineConfig *pConfig = ap_get_module_config(cmd->server->module_config, &styleCombine_module);
 	if ((NULL == arg) || (strlen(arg) <= 1)) {
-		return "styleCombine domain value may not be null";
+		return "styleCombine old domain value may not be null";
 	} else {
-		pConfig->domain->ptr = apr_pstrdup(cmd->pool, arg);
-		pConfig->domain->used = strlen(arg);
-		pConfig->domain->size = pConfig->domain->used;
+		pConfig->oldDomain->ptr = apr_pstrdup(cmd->pool, arg);
+		pConfig->oldDomain->used = strlen(arg);
+		pConfig->oldDomain->size = pConfig->oldDomain->used;
+	}
+	return NULL;
+}
+
+static const char *setNewDomain(cmd_parms *cmd, void *dummy, const char *arg) {
+	CombineConfig *pConfig = ap_get_module_config(cmd->server->module_config, &styleCombine_module);
+	if ((NULL == arg) || (strlen(arg) <= 1)) {
+		return "styleCombine new domain value may not be null";
+	} else {
+		pConfig->newDomain->ptr = apr_pstrdup(cmd->pool, arg);
+		pConfig->newDomain->used = strlen(arg);
+		pConfig->newDomain->size = pConfig->newDomain->used;
 	}
 	return NULL;
 }
@@ -1073,7 +1090,9 @@ static const command_rec styleCombineCmds[] =
 
 		AP_INIT_TAKE1("filterCntType", setFilterCntType, NULL, OR_ALL, "filter content type"),
 
-		AP_INIT_TAKE1("domain", setDomain, NULL, OR_ALL, "style version domain url"),
+		AP_INIT_TAKE1("oldDomain", setOldDomain, NULL, OR_ALL, "style old domain url"),
+
+		AP_INIT_TAKE1("newDomain", setNewDomain, NULL, OR_ALL, "style new domain url"),
 
 		AP_INIT_TAKE1("maxUrlLen", setMaxUrlLen, NULL, OR_ALL, "url max len"),
 
