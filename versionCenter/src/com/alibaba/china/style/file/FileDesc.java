@@ -12,7 +12,7 @@ public class FileDesc implements Serializable, Comparable<FileDesc> {
     /**
      * 
      */
-    private static final long serialVersionUID = -1586706719813219055L;
+    private static final long serialVersionUID = 7186030185483971823L;
 
     private String            path;
 
@@ -26,7 +26,7 @@ public class FileDesc implements Serializable, Comparable<FileDesc> {
 
     private String            content;
 
-    private String            version;
+    private long              version;
 
     public FileDesc(){
     }
@@ -79,11 +79,11 @@ public class FileDesc implements Serializable, Comparable<FileDesc> {
         this.content = content;
     }
 
-    public String getVersion() {
+    public long getVersion() {
         return version;
     }
 
-    public void setVersion(String version) {
+    public void setVersion(long version) {
         this.version = version;
     }
 

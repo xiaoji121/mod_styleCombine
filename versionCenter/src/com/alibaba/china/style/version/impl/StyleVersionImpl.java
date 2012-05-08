@@ -154,11 +154,11 @@ public class StyleVersionImpl implements StyleVersion {
                 byte[] input = IOUtil.bytesRead(file.getAbsolutePath());
                 String md5Sum = md5sum(input);
 
-                int newVersion = Math.abs(md5Sum.hashCode()) + input.length;
+                long newVersion = Math.abs(md5Sum.hashCode());
                 /*
                  * if new version equals old version, need to fix the version
                  */
-                if (null != srcFd && newVersion == Integer.valueOf(srcFd.getVersion())) {
+                if (null != srcFd && newVersion == srcFd.getVersion()) {
                     ++newVersion;
                 }
 
@@ -168,7 +168,7 @@ public class StyleVersionImpl implements StyleVersion {
                 newFd.setLastModified(file.lastModified());
                 newFd.setMd5Sum(md5Sum);
                 newFd.setSize(file.length());
-                newFd.setVersion(String.valueOf(newVersion));
+                newFd.setVersion(newVersion);
 
                 if (null != srcFd && newFd.equals(srcFd)) {
                     // set new lastModified time
