@@ -419,9 +419,7 @@ static void combineStyles(CombineConfig *pConfig, int styleType, StyleLinkList *
 		register time_t nlastModified = linkList->version;
 		switch (linkList->postion) {
 			case 'f':
-				if (fv < nlastModified) {
-					fv += nlastModified;
-				}
+				fv += nlastModified;
 				tmpUriBuf = tmpCombine->footerBuf;
 				if (f > 0) {
 					stringAppend(tmpUriBuf, URI_SEPARATOR, 1);
@@ -430,9 +428,7 @@ static void combineStyles(CombineConfig *pConfig, int styleType, StyleLinkList *
 				}
 				break;
 			case 't':
-				if (tv < nlastModified) {
-					tv += nlastModified;
-				}
+				tv += nlastModified;
 				tmpUriBuf = tmpCombine->topBuf;
 				if (t > 0) {
 					stringAppend(tmpUriBuf, URI_SEPARATOR, 1);
@@ -441,9 +437,7 @@ static void combineStyles(CombineConfig *pConfig, int styleType, StyleLinkList *
 				}
 				break;
 			case 'h':
-				if (hv < nlastModified) {
-					hv += nlastModified;
-				}
+				hv += nlastModified;
 				tmpUriBuf = tmpCombine->headBuf;
 				if (h > 0) {
 					stringAppend(tmpUriBuf, URI_SEPARATOR, 1);
