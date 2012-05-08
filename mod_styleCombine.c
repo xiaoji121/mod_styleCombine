@@ -223,7 +223,6 @@ time_t getURIVersion(buffer *uri, char *singleUri) {
 	if(NULL == uri || NULL == singleUri) {
 		return 0;
 	}
-	time_t lastModified = 0;
 	time_t newVersion = 0;
 
 	char *fileExt = getFileExt(uri->ptr, uri->used);
@@ -251,18 +250,15 @@ time_t getURIVersion(buffer *uri, char *singleUri) {
 		if(NULL != styleTable) {
 			const char *strVs = apr_table_get(styleTable, singleUri);
 			if(NULL != strVs) {
-				newVersion = atol(strVs);
+				newVersion += atol(strVs);
 			}
 		}
-		if (lastModified < newVersion) {
-			lastModified = newVersion;
-		}
 	}
-	if (0 == lastModified) {
-		time(&lastModified);
-		lastModified = lastModified / 600;
+	if (newVersion <= 0) {
+		time(&newVersion);
+		newVersion = newVersion / 600;
 	}
-	return lastModified;
+	return newVersion;
 }
 
 static char strToPosition(char *str) {
