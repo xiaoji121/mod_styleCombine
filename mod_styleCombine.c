@@ -989,12 +989,12 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 		} else {
 			addBucket(c, ctx->pbbOut, ctx->buf->ptr, ctx->buf->used);
 		}
-		apr_bucket *pbktEOS = apr_bucket_eos_create(c->bucket_alloc);
-		APR_BRIGADE_INSERT_TAIL(ctx->pbbOut, pbktEOS);
 		//free
 		combinedStyle_free(&combinedStyle);
 		buffer_free(dstBuf);
 	}
+	//append eos
+	APR_BRIGADE_INSERT_TAIL(ctx->pbbOut, apr_bucket_eos_create(c->bucket_alloc));
 	apr_table_get(r->notes, "ok");
 	buffer_free(ctx->buf);
 	apr_brigade_cleanup(pbbIn);
