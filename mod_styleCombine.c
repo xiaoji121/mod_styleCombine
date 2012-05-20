@@ -540,8 +540,8 @@ static void resetHtml(conn_rec *c, apr_bucket_brigade *pbbkOut,
 }
 
 static inline char *strSearch(const char * str1, char **matchedType, char **isExpression) {
-	char *cp = (char *) str1;
-	char *s1 = NULL;
+	register char *cp = (char *) str1;
+	register char *s1 = NULL;
 
 	register int r = -1;
 	while (*cp) {
