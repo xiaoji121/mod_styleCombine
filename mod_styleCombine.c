@@ -29,7 +29,6 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 #define EXT_JS ".js"
 #define EXT_CSS ".css"
 #define URI_SEPARATOR "|"
-#define URI_QUERY_PARAM "?_v="
 #define FIELD_POSITION "pos=" //position
 #define POSITION_LEN 4
 #define POSITION_TOP "top"
@@ -41,7 +40,7 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 #define CSS_PREFIX_TXT "<link rel=\"stylesheet\" href=\""
 #define CSS_SUFFIX_TXT "\" />"
 
-#define URI_VERSION_LEN  20
+#define URI_VERSION_LEN  30
 #define DEFAULT_BUF_SIZE 128
 #define DEFAULT_CONTENT_LEN (1024 << 10)// default html content size 1M
 
@@ -53,9 +52,11 @@ int CSS_SUFFIX_TXT_LEN = 0;
 /***********global variable************/
 const char ZERO_END = '\0';
 /*position char */
-const char pf = 'f'; //footer
-const char pt = 't'; //top
-const char ph = 'h'; //head
+const char posTop = 't'; //top
+const char posHead = 'h'; //head
+const char posFooter = 'f'; //footer
+const char posNon = ' '; //non pos
+
 int styleTableSize = 20000;
 
 volatile apr_pool_t   *globalPool = NULL;
@@ -106,7 +107,8 @@ typedef struct {
 	char     postion;
 	buffer  *styleUri;
 	time_t   version;
-	struct styleLinkList *prevItem;
+	int      size;
+	struct   StyleLinkList *prevItem;
 } StyleLinkList;
 
 typedef struct {
@@ -277,18 +279,18 @@ time_t getURIVersion(buffer *uri, char *singleUri, request_rec *r) {
 
 static char strToPosition(char *str) {
 	if(NULL == str) {
-		return ' ';
+		return posNon;
 	}
 	if (0 == strncmp(POSITION_TOP, str, 3)) {
-		return 't';
+		return posTop;
 	}
 	if (0 == strncmp(POSITION_HEAD, str, 4)) {
-		return 'h';
+		return posHead;
 	}
 	if (0 == strncmp(POSITION_FOOTER, str, 6)) {
-		return 'f';
+		return posFooter;
 	}
-	return ' ';
+	return posNon;
 }
 
 static void loadStyleVersion(request_rec *r, CombineConfig *pConfig) {
@@ -400,10 +402,9 @@ static void addTag(CombineConfig *pConfig, int styleType, buffer *destBuf, buffe
 	}
 	stringAppend(destBuf, pConfig->newDomain->ptr, pConfig->newDomain->used);
 	stringAppend(destBuf, uri->ptr, uri->used);
-	stringAppend(destBuf, URI_QUERY_PARAM, 4);
 
 	char strVersion[URI_VERSION_LEN];
-	snprintf(strVersion, URI_VERSION_LEN - 1, "%ld", version);
+	snprintf(strVersion, URI_VERSION_LEN - 1, "?_v=%ld", version);
 	stringAppend(destBuf, strVersion , strlen(strVersion));
 
 	if (0 == styleType) {
@@ -423,72 +424,68 @@ static void combineStyles(CombineConfig *pConfig, int styleType, StyleLinkList *
 		return;
 	}
 
-	time_t tv = 0, hv = 0, fv = 0, tmpVersion = 0;
-	int f = 0, t = 0, h = 0;
-
-	buffer *tmpUriBuf = NULL;
-	buffer *tmpPositionBuf = NULL;
+	register time_t topVersion = 0, headVersion = 0, footerVersion = 0;
+	register int top = 0, head = 0, footer = 0;
+	register buffer *tmpUriBuf = NULL;
 
 	for (; NULL != linkList; linkList = linkList->prevItem) {
-		register time_t nlastModified = linkList->version;
 		switch (linkList->postion) {
-			case 'f':
-				fv += nlastModified;
-				tmpUriBuf = tmpCombine->footerBuf;
-				if (f > 0) {
-					stringAppend(tmpUriBuf, URI_SEPARATOR, 1);
-				} else {
-					f++;
-				}
-				break;
-			case 't':
-				tv += nlastModified;
+			case 't': //top
+				topVersion += linkList->version;
 				tmpUriBuf = tmpCombine->topBuf;
-				if (t > 0) {
+				if (top > 0) {
 					stringAppend(tmpUriBuf, URI_SEPARATOR, 1);
 				} else {
-					t++;
+					top++;
 				}
 				break;
-			case 'h':
-				hv += nlastModified;
+			case 'h': //head
+				headVersion += linkList->version;
 				tmpUriBuf = tmpCombine->headBuf;
-				if (h > 0) {
+				if (head > 0) {
 					stringAppend(tmpUriBuf, URI_SEPARATOR, 1);
 				} else {
-					h++;
+					head++;
+				}
+				break;
+			case 'f': //footer
+				footerVersion += linkList->version;
+				tmpUriBuf = tmpCombine->footerBuf;
+				if (head > 0) {
+					stringAppend(tmpUriBuf, URI_SEPARATOR, 1);
+				} else {
+					head++;
 				}
 				break;
 			default:
 				break;
 		}
-		//control url len overmax
+		//url拼接在一起的长度超过配置的长度，则需要分成多个请求来处理。
 		if ((tmpUriBuf->used + linkList->styleUri->used) > pConfig->maxUrlLen) {
-			if (pf == linkList->postion) {
-				f = 1;
-				tmpVersion = fv;
-				tmpPositionBuf = combinedStyle->footerBuf;
+			//将合并的url最后一个|字符去除
+			tmpUriBuf->ptr[--tmpUriBuf->used] = ZERO_END;
+
+			if (posTop == linkList->postion) {
+				top = 1;
+				addTag(pConfig, styleType, combinedStyle->topBuf, tmpUriBuf, topVersion);
 			}
-			if (pf == linkList->postion) {
-				t = 1;
-				tmpVersion = tv;
-				tmpPositionBuf = combinedStyle->topBuf;
+			if (posHead == linkList->postion) {
+				head = 1;
+				addTag(pConfig, styleType, combinedStyle->headBuf, tmpUriBuf, headVersion);
 			}
-			if (ph == linkList->postion) {
-				h = 1;
-				tmpVersion = hv;
-				tmpPositionBuf = combinedStyle->headBuf;
+			if (posFooter == linkList->postion) {
+				footer = 1;
+				addTag(pConfig, styleType, combinedStyle->footerBuf, tmpUriBuf, footerVersion);
 			}
-			addTag(pConfig, styleType, tmpPositionBuf, tmpUriBuf, tmpVersion);
 			//reset value
 			tmpUriBuf->used = 0;
-			tmpUriBuf->ptr[0] = ZERO_END; //clean no used string
+			//tmpUriBuf->ptr[0] = ZERO_END; //clean no used string
 		}
 		stringAppend(tmpUriBuf, linkList->styleUri->ptr, linkList->styleUri->used);
 	}
-	addTag(pConfig, styleType, combinedStyle->topBuf, tmpCombine->topBuf, tv);
-	addTag(pConfig, styleType, combinedStyle->headBuf, tmpCombine->headBuf, hv);
-	addTag(pConfig, styleType, combinedStyle->footerBuf, tmpCombine->footerBuf, fv);
+	addTag(pConfig, styleType, combinedStyle->topBuf, tmpCombine->topBuf, topVersion);
+	addTag(pConfig, styleType, combinedStyle->headBuf, tmpCombine->headBuf, headVersion);
+	addTag(pConfig, styleType, combinedStyle->footerBuf, tmpCombine->footerBuf, footerVersion);
 	return;
 }
 
@@ -614,11 +611,11 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 	StyleLinkList *cssPrevLinkList = NULL;
 
 	char *subHtml = sourceCnt->ptr;
-	int ssize = (pConfig->maxUrlLen + 98);
+	int maxTagSize = (pConfig->maxUrlLen + 98);
 	char *matchedType = NULL;
 	char *isExpression = "0";
 	//(js/css)应该放置的位置 h:head; f:footer; l:lib(表示公共类库，放在<head>里面)
-	register char position = 'h';
+	register char position = posHead;
 	register int isProcessed = 0;
 	register ParserTag *ptag = NULL;
 	register int i = 0;
@@ -627,16 +624,17 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 
 	while (NULL != (curPoint = strSearch(subHtml, &matchedType, &isExpression))) {
 
-		position = 'h';
+		position = posHead; //set detault pos
 		tmpPoint = curPoint;
 
 		stringAppend(dstBuf, subHtml, curPoint - subHtml);
+		//此时表示当前是js文件，需要使用js的标签来处理
 		if(0 == memcmp(matchedType, "j", 1)) {
 			ptag = jsPtag;
 		} else {
 			ptag = cssPtag;
 		}
-		for (i = 0; (curPoint[i] != ptag->suffix) && i < ssize; i++) {
+		for (i = 0; (curPoint[i] != ptag->suffix) && i < maxTagSize; i++) {
 			maxTagBuf[i] = curPoint[i];
 		}
 		maxTagBuf[i++] = ptag->suffix;
@@ -683,7 +681,7 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 				fpois += POSITION_LEN + 1;
 			}
 			position = strToPosition(fpois);
-			if (' ' == position) {
+			if (posNon == position) {
 				addTag(pConfig, ptag->styleType, dstBuf, maxUrlBuf, nversion);
 				subHtml = curPoint;
 				continue;
@@ -701,23 +699,21 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 			continue;
 		}
 
-		//combined tag string
+		//is combined tag string
 		if (NULL != strstr(maxUrlBuf->ptr, URI_SEPARATOR)) {
-			buffer *tmpPosBuf = NULL;
 			switch (position) {
-				case 'f':
-					tmpPosBuf = combinedStyle->footerBuf;
+				case 't': //top
+					addTag(pConfig, ptag->styleType, combinedStyle->topBuf, maxUrlBuf, nversion);
 					break;
-				case 't':
-					tmpPosBuf = combinedStyle->topBuf;
+				case 'h'://head
+					addTag(pConfig, ptag->styleType, combinedStyle->headBuf, maxUrlBuf, nversion);
 					break;
-				case 'h':
-					tmpPosBuf = combinedStyle->headBuf;
+				case 'f'://footer
+					addTag(pConfig, ptag->styleType, combinedStyle->footerBuf, maxUrlBuf, nversion);
 					break;
 				default:
 					break;
 			}
-			addTag(pConfig, ptag->styleType, tmpPosBuf, maxUrlBuf, nversion);
 		} else {
 			//add to linkList
 			StyleLinkList *linkItem = apr_palloc(r->pool, sizeof(StyleLinkList));
@@ -739,16 +735,20 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 			if(0 == ptag->styleType) {
 				if (NULL == cssLinkList) {
 					cssLinkList = linkItem;
+					cssLinkList->size = 0;
 				} else {
 					cssPrevLinkList->prevItem = linkItem;
 				}
+				++cssLinkList->size;
 				cssPrevLinkList = linkItem;
 			} else {
 				if (NULL == jsLinkList) {
 					jsLinkList = linkItem;
+					jsLinkList->size = 0;
 				} else {
 					jsPrevLinkList->prevItem = linkItem;
 				}
+				++jsLinkList->size;
 				jsPrevLinkList = linkItem;
 			}
 		}
