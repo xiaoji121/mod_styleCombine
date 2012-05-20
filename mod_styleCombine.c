@@ -219,7 +219,7 @@ static void formatParser(apr_table_t *table, char *str) {
 	return;
 }
 
-time_t getURIVersion(buffer *uri, char *singleUri) {
+time_t getURIVersion(buffer *uri, char *singleUri, request_rec *r) {
 	if(NULL == uri || NULL == singleUri) {
 		return 0;
 	}
@@ -231,6 +231,16 @@ time_t getURIVersion(buffer *uri, char *singleUri) {
 	}
 	int fileExtLen = strlen(fileExt);
 	int uriLen = uri->used;
+
+	if(NULL == styleTable) {
+		time(&newVersion);
+		newVersion = newVersion / 600;
+
+		uri->ptr[uri->used] = ZERO_END;
+		// add log
+		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "==method=getURIVersion can't get version, urls:[%s]", uri->ptr);
+		return newVersion;
+	}
 
 	int i , t = 0;
 	for(i = 0; i < uriLen; ++i, ++t) {
@@ -251,6 +261,10 @@ time_t getURIVersion(buffer *uri, char *singleUri) {
 			const char *strVs = apr_table_get(styleTable, singleUri);
 			if(NULL != strVs) {
 				newVersion += atol(strVs);
+			} else {
+				// add log
+				ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
+											"==method=getURIVersion can't get version, url:[%s]", singleUri);
 			}
 		}
 	}
@@ -449,7 +463,7 @@ static void combineStyles(CombineConfig *pConfig, int styleType, StyleLinkList *
 				break;
 		}
 		//control url len overmax
-		if (tmpUriBuf->used > pConfig->maxUrlLen) {
+		if ((tmpUriBuf->used + linkList->styleUri->used) > pConfig->maxUrlLen) {
 			if (pf == linkList->postion) {
 				f = 1;
 				tmpVersion = fv;
@@ -641,7 +655,7 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 			continue;
 		}
 		// 0:single style; 1:multi style
-		time_t nversion = getURIVersion(maxUrlBuf, singleUri);
+		time_t nversion = getURIVersion(maxUrlBuf, singleUri, r);
 		memcpy(singleUri, maxUrlBuf->ptr, maxUrlBuf->used);
 		if (1 == ptag->styleType) {
 			/**
@@ -1051,7 +1065,7 @@ static const char *setMaxUrlLen(cmd_parms *cmd, void *dummy, const char *arg) {
 	CombineConfig *pConfig = ap_get_module_config(cmd->server->module_config, &styleCombine_module);
 	int len = 0;
 	if ((NULL == arg) || (len = atoi(arg)) < pConfig->maxUrlLen) {
-		ap_log_error(APLOG_MARK, LOG_ERR, 0, cmd->server, "maxUrlLen to small, will set default  2083!");
+		ap_log_error(APLOG_MARK, LOG_ERR, 0, cmd->server, "maxUrlLen too small, will set default  2083!");
 	} else {
 		pConfig->maxUrlLen = len;
 	}
@@ -1109,7 +1123,7 @@ static void styleCombine_register_hooks(apr_pool_t *p) {
 
 /* Dispatch list for API hooks */
 module AP_MODULE_DECLARE_DATA styleCombine_module = {
-    STANDARD20_MODULE_STUFF, 
+    STANDARD20_MODULE_STUFF,
     NULL,                  /* create per-dir    config structures */
     NULL,                  /* merge  per-dir    config structures */
     configServerCreate,    /* create per-server config structures */
