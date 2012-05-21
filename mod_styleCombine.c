@@ -435,27 +435,27 @@ static void combineStyles(CombineConfig *pConfig, int styleType, StyleLinkList *
 				tmpUriBuf = tmpCombine->topBuf;
 				if (top > 0) {
 					stringAppend(tmpUriBuf, URI_SEPARATOR, 1);
-				} else {
-					top++;
+					break;
 				}
+				top = 1;
 				break;
 			case 'h': //head
 				headVersion += linkList->version;
 				tmpUriBuf = tmpCombine->headBuf;
 				if (head > 0) {
 					stringAppend(tmpUriBuf, URI_SEPARATOR, 1);
-				} else {
-					head++;
+					break;
 				}
+				head = 1;
 				break;
 			case 'f': //footer
 				footerVersion += linkList->version;
 				tmpUriBuf = tmpCombine->footerBuf;
-				if (head > 0) {
+				if (footer > 0) {
 					stringAppend(tmpUriBuf, URI_SEPARATOR, 1);
-				} else {
-					head++;
+					break;
 				}
+				footer = 1;
 				break;
 			default:
 				break;
@@ -465,17 +465,24 @@ static void combineStyles(CombineConfig *pConfig, int styleType, StyleLinkList *
 			//将合并的url最后一个|字符去除
 			tmpUriBuf->ptr[--tmpUriBuf->used] = ZERO_END;
 
-			if (posTop == linkList->postion) {
-				top = 1;
-				addTag(pConfig, styleType, combinedStyle->topBuf, tmpUriBuf, topVersion);
-			}
-			if (posHead == linkList->postion) {
-				head = 1;
-				addTag(pConfig, styleType, combinedStyle->headBuf, tmpUriBuf, headVersion);
-			}
-			if (posFooter == linkList->postion) {
-				footer = 1;
-				addTag(pConfig, styleType, combinedStyle->footerBuf, tmpUriBuf, footerVersion);
+			switch(linkList->postion) {
+				case 't':
+					addTag(pConfig, styleType, combinedStyle->topBuf, tmpUriBuf, topVersion);
+					top = 1;
+					topVersion = 0;
+					break;
+				case 'h':
+					addTag(pConfig, styleType, combinedStyle->headBuf, tmpUriBuf, headVersion);
+					head = 1;
+					headVersion = 0;
+					break;
+				case 'f':
+					addTag(pConfig, styleType, combinedStyle->footerBuf, tmpUriBuf, footerVersion);
+					footer = 1;
+					footerVersion = 0;
+					break;
+				default:
+					break;
 			}
 			//reset value
 			tmpUriBuf->used = 0;
