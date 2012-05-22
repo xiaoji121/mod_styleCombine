@@ -37,7 +37,7 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 #define DEBUG_MODE "debugMode=1"
 #define JS_PREFIX_TXT "\n<script type=\"text/javascript\" src=\""
 #define JS_SUFFIX_TXT "\"></script>"
-#define CSS_PREFIX_TXT "\n<link rel=\"stylesheet\" href=\""
+#define CSS_PREFIX_TXT "<link rel=\"stylesheet\" href=\""
 #define CSS_SUFFIX_TXT "\" />"
 
 #define URI_VERSION_LEN  30
@@ -267,7 +267,7 @@ time_t getURIVersion(buffer *uri, char *singleUri, request_rec *r) {
 			} else {
 				// add log
 				ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
-				"==method=getURIVersion err, url:[%s] requestURI:[%s]", singleUri, r->unparsed_uri);
+				"==method=getURIVersion err, uris[%s]  uri:[%s]  requestURI:[%s]", uri->ptr, singleUri, r->unparsed_uri);
 			}
 		}
 	}
@@ -690,8 +690,11 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 			char *fpois = strstr(maxTagBuf, FIELD_POSITION);
 			if(NULL != fpois) {
 				fpois += POSITION_LEN + 1;
+				position = strToPosition(fpois);
+			} else {
+				position = posNon;
 			}
-			position = strToPosition(fpois);
+
 			if (posNon == position) {
 				addTag(pConfig, ptag->styleType, dstBuf, maxUrlBuf, nversion);
 				subHtml = curPoint;
@@ -764,7 +767,7 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 			}
 		}
 		//clean \r\n \n \t & empty char
-		while('\n' == *curPoint || '\r\n' == *curPoint || '\t' == *curPoint || ' ' == *curPoint) {
+		while(' ' == *curPoint || '\n' == *curPoint || '\r' == *curPoint || '\t' == *curPoint) {
 			++curPoint;
 		}
 		subHtml = curPoint;
