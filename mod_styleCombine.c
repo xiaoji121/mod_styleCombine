@@ -35,9 +35,9 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 #define POSITION_HEAD "head"
 #define POSITION_FOOTER "footer"
 #define DEBUG_MODE "debugMode=1"
-#define JS_PREFIX_TXT "<script type=\"text/javascript\" src=\""
+#define JS_PREFIX_TXT "\n<script type=\"text/javascript\" src=\""
 #define JS_SUFFIX_TXT "\"></script>"
-#define CSS_PREFIX_TXT "<link rel=\"stylesheet\" href=\""
+#define CSS_PREFIX_TXT "\n<link rel=\"stylesheet\" href=\""
 #define CSS_SUFFIX_TXT "\" />"
 
 #define URI_VERSION_LEN  30
@@ -57,13 +57,12 @@ const char posHead = 'h'; //head
 const char posFooter = 'f'; //footer
 const char posNon = ' '; //non pos
 
-int styleTableSize = 20000;
+int styleTableSize = 30000;
 
 volatile apr_pool_t   *globalPool = NULL;
 volatile apr_table_t  *styleTable = NULL;
 volatile apr_time_t    lastLoadTime;
 volatile __time_t      prevTime = 0;
-
 
 
 typedef struct {
@@ -240,7 +239,9 @@ time_t getURIVersion(buffer *uri, char *singleUri, request_rec *r) {
 
 		uri->ptr[uri->used] = ZERO_END;
 		// add log
-		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "==method=getURIVersion can't get version, urls:[%s]", uri->ptr);
+		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
+		  "=method=getURIVersion err, urls:[%s] requestURI:[%s]", uri->ptr, r->unparsed_uri);
+
 		return newVersion;
 	}
 
@@ -266,7 +267,7 @@ time_t getURIVersion(buffer *uri, char *singleUri, request_rec *r) {
 			} else {
 				// add log
 				ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
-											"==method=getURIVersion can't get version, url:[%s]", singleUri);
+				"==method=getURIVersion err, url:[%s] requestURI:[%s]", singleUri, r->unparsed_uri);
 			}
 		}
 	}
@@ -423,7 +424,6 @@ static void combineStyles(CombineConfig *pConfig, int styleType, StyleLinkList *
 	if(NULL == linkList) {
 		return;
 	}
-
 	register time_t topVersion = 0, headVersion = 0, footerVersion = 0;
 	register int top = 0, head = 0, footer = 0;
 	register buffer *tmpUriBuf = NULL;
@@ -654,6 +654,10 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 		}
 		isProcessed = 1;
 
+		if(pConfig->debugMode) {
+			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "=maxTagBuf:[%s] maxUrlBuf:[%s]", maxTagBuf, maxUrlBuf->ptr);
+		}
+
 		int singleUriLen = maxUrlBuf->used;
 		char *singleUri = apr_palloc(r->pool, singleUriLen);
 		if(NULL == singleUri) {
@@ -668,7 +672,7 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 			 * 结束符中间可能有空格或制表符，所以忽略这些
 			 * 如果没有结束符，将不进行处理.
 			 */
-			for(; isspace(*curPoint) && *curPoint != ZERO_END; curPoint++);
+			for(; (isspace(*curPoint) && *curPoint != ZERO_END); curPoint++);
 
 			if (memcmp(ptag->closeTag->ptr, curPoint, ptag->closeTag->used) != 0) {
 				//找不到结束的</script>
@@ -742,22 +746,26 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 			if(0 == ptag->styleType) {
 				if (NULL == cssLinkList) {
 					cssLinkList = linkItem;
-					cssLinkList->size = 0;
+					//cssLinkList->size = 0;
 				} else {
 					cssPrevLinkList->prevItem = linkItem;
 				}
-				++cssLinkList->size;
+				//++cssLinkList->size;
 				cssPrevLinkList = linkItem;
 			} else {
 				if (NULL == jsLinkList) {
 					jsLinkList = linkItem;
-					jsLinkList->size = 0;
+					//jsLinkList->size = 0;
 				} else {
 					jsPrevLinkList->prevItem = linkItem;
 				}
-				++jsLinkList->size;
+				//++jsLinkList->size;
 				jsPrevLinkList = linkItem;
 			}
+		}
+		//clean \r\n \n \t & empty char
+		while('\n' == *curPoint || '\r\n' == *curPoint || '\t' == *curPoint || ' ' == *curPoint) {
+			++curPoint;
 		}
 		subHtml = curPoint;
 	}
@@ -770,6 +778,7 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 		tmpCombine.footerBuf = buffer_init();
 		if(!tmpCombine.topBuf || !tmpCombine.headBuf || !tmpCombine.footerBuf) {
 			//app has error now skip this processer
+			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "if(isProcessed){has Error}:[%s]", r->unparsed_uri);
 			return 0;
 		}
 		combineStyles(pConfig, cssPtag->styleType, cssLinkList, combinedStyle, &tmpCombine);
