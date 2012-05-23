@@ -35,7 +35,8 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 #define POSITION_HEAD "head"
 #define POSITION_FOOTER "footer"
 #define DEBUG_MODE "debugMode=1"
-#define JS_PREFIX_TXT "\n<script type=\"text/javascript\" src=\""
+#define JS_PREFIX_TXT "<script type=\"text/javascript\" src=\""
+#define JS_PREFIX_NEWLINE_TXT "\n<script type=\"text/javascript\" src=\""
 #define JS_SUFFIX_TXT "\"></script>"
 #define CSS_PREFIX_TXT "<link rel=\"stylesheet\" href=\""
 #define CSS_SUFFIX_TXT "\" />"
@@ -45,6 +46,7 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 #define DEFAULT_CONTENT_LEN (1024 << 10)// default html content size 1M
 
 int JS_PREFIX_TXT_LEN = 0;
+int JS_PREFIX_NEWLINE_TXT_LEN = 0;
 int JS_SUFFIX_TXT_LEN = 0;
 int CSS_PREFIX_TXT_LEN = 0;
 int CSS_SUFFIX_TXT_LEN = 0;
@@ -391,13 +393,15 @@ static int tagFilter(CombineConfig *pConfig, ParserTag *ptag, char *maxTagBuf, b
 	return maxUrlBuf->used;
 }
 
-static void addTag(CombineConfig *pConfig, int styleType, buffer *destBuf, buffer *uri, time_t version) {
+static void addTag(CombineConfig *pConfig, int styleType, buffer *destBuf, buffer *uri, time_t version, int newLine) {
 	if(NULL == destBuf || NULL == uri || !uri->used) {
 		return ;
 	}
-
 	if (0 == styleType) {
 		stringAppend(destBuf, CSS_PREFIX_TXT, CSS_PREFIX_TXT_LEN);
+	} else if(newLine) {
+		//add \n at style tag in head
+		stringAppend(destBuf, JS_PREFIX_NEWLINE_TXT, JS_PREFIX_NEWLINE_TXT_LEN);
 	} else {
 		stringAppend(destBuf, JS_PREFIX_TXT, JS_PREFIX_TXT_LEN);
 	}
@@ -467,17 +471,17 @@ static void combineStyles(CombineConfig *pConfig, int styleType, StyleLinkList *
 
 			switch(linkList->postion) {
 				case 't':
-					addTag(pConfig, styleType, combinedStyle->topBuf, tmpUriBuf, topVersion);
+					addTag(pConfig, styleType, combinedStyle->topBuf, tmpUriBuf, topVersion, 1);
 					top = 1;
 					topVersion = 0;
 					break;
 				case 'h':
-					addTag(pConfig, styleType, combinedStyle->headBuf, tmpUriBuf, headVersion);
+					addTag(pConfig, styleType, combinedStyle->headBuf, tmpUriBuf, headVersion, 1);
 					head = 1;
 					headVersion = 0;
 					break;
 				case 'f':
-					addTag(pConfig, styleType, combinedStyle->footerBuf, tmpUriBuf, footerVersion);
+					addTag(pConfig, styleType, combinedStyle->footerBuf, tmpUriBuf, footerVersion, 1);
 					footer = 1;
 					footerVersion = 0;
 					break;
@@ -490,9 +494,9 @@ static void combineStyles(CombineConfig *pConfig, int styleType, StyleLinkList *
 		}
 		stringAppend(tmpUriBuf, linkList->styleUri->ptr, linkList->styleUri->used);
 	}
-	addTag(pConfig, styleType, combinedStyle->topBuf, tmpCombine->topBuf, topVersion);
-	addTag(pConfig, styleType, combinedStyle->headBuf, tmpCombine->headBuf, headVersion);
-	addTag(pConfig, styleType, combinedStyle->footerBuf, tmpCombine->footerBuf, footerVersion);
+	addTag(pConfig, styleType, combinedStyle->topBuf, tmpCombine->topBuf, topVersion, 1);
+	addTag(pConfig, styleType, combinedStyle->headBuf, tmpCombine->headBuf, headVersion, 1);
+	addTag(pConfig, styleType, combinedStyle->footerBuf, tmpCombine->footerBuf, footerVersion, 1);
 	return;
 }
 
@@ -696,7 +700,7 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 			}
 
 			if (posNon == position) {
-				addTag(pConfig, ptag->styleType, dstBuf, maxUrlBuf, nversion);
+				addTag(pConfig, ptag->styleType, dstBuf, maxUrlBuf, nversion, 0);
 				subHtml = curPoint;
 				continue;
 			}
@@ -708,7 +712,7 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 		}
 		//process expression <!--[if IE]>
 		if(0 == memcmp(isExpression, "1", 1)) {
-			addTag(pConfig, ptag->styleType, dstBuf, maxUrlBuf, nversion);
+			addTag(pConfig, ptag->styleType, dstBuf, maxUrlBuf, nversion, 0);
 			subHtml = curPoint;
 			continue;
 		}
@@ -717,13 +721,13 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 		if (NULL != strstr(maxUrlBuf->ptr, URI_SEPARATOR)) {
 			switch (position) {
 				case 't': //top
-					addTag(pConfig, ptag->styleType, combinedStyle->topBuf, maxUrlBuf, nversion);
+					addTag(pConfig, ptag->styleType, combinedStyle->topBuf, maxUrlBuf, nversion, 0);
 					break;
 				case 'h'://head
-					addTag(pConfig, ptag->styleType, combinedStyle->headBuf, maxUrlBuf, nversion);
+					addTag(pConfig, ptag->styleType, combinedStyle->headBuf, maxUrlBuf, nversion, 0);
 					break;
 				case 'f'://footer
-					addTag(pConfig, ptag->styleType, combinedStyle->footerBuf, maxUrlBuf, nversion);
+					addTag(pConfig, ptag->styleType, combinedStyle->footerBuf, maxUrlBuf, nversion, 0);
 					break;
 				default:
 					break;
@@ -811,6 +815,7 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 		return NULL;
 	}
 	JS_PREFIX_TXT_LEN = strlen(JS_PREFIX_TXT);
+	JS_PREFIX_NEWLINE_TXT_LEN = strlen(JS_PREFIX_NEWLINE_TXT);
 	JS_SUFFIX_TXT_LEN = strlen(JS_SUFFIX_TXT);
 	CSS_PREFIX_TXT_LEN = strlen(CSS_PREFIX_TXT);
 	CSS_SUFFIX_TXT_LEN = strlen(CSS_SUFFIX_TXT);
