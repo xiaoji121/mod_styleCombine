@@ -236,7 +236,7 @@ static void uriSplit(server *srv, connection *con, fileObjectWrapper *fObjectWra
 
 	buffer *subUri = con->uri.path;
 	int uriLen = subUri->used - 1;
-	int i , t = 0;
+	register int i , t = 0;
 	for(i = 0; i < uriLen; ++i, ++t) {
 		if(i != 0 && memcmp(&subUri->ptr[i], URI_SEPARATOR, 1) == 0) {
 			maxUriArray[t] = ZERO_END;
@@ -419,7 +419,6 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 	if(HANDLER_ERROR != stat_cache_get_entry(srv, con, combinedFullPath, &sce)) {
 		combinedMtime = sce->st.st_mtime;
 	}
-	//FIXME: use file lock
 	if(combinedMtime != fObjectWrapper.lastModified) {
 		int combinResult = fileCombining(srv, con, &fObjectWrapper, combinedFullPath->ptr);
 		if(1 == combinResult) {
