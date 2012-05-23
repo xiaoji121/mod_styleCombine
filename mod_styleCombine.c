@@ -357,15 +357,15 @@ static void loadStyleVersion(request_rec *r, CombineConfig *pConfig) {
 	return;
 }
 
-static int tagFilter(CombineConfig *pConfig, ParserTag *ptag, char *tagBuf, buffer *uriBuf) {
-	if(NULL == pConfig || NULL == ptag || NULL == tagBuf || NULL == uriBuf) {
+static int tagFilter(CombineConfig *pConfig, ParserTag *ptag, char *maxTagBuf, buffer *maxUrlBuf) {
+	if(NULL == pConfig || NULL == ptag || NULL == maxTagBuf || NULL == maxUrlBuf) {
 		return 0;
 	}
-	if (NULL == strstr(tagBuf, ptag->mark->ptr)) {
+	if (NULL == strstr(maxTagBuf, ptag->mark->ptr)) {
 		//表示是一个非 css / javascript 文件引用，则跳过处理
 		return 0;
 	}
-	char *curURLDomain = strstr(tagBuf, pConfig->oldDomain->ptr);
+	char *curURLDomain = strstr(maxTagBuf, pConfig->oldDomain->ptr);
 	if (NULL == curURLDomain) {
 		//对于没有域名的css/js不进行处理
 		return 0;
@@ -377,7 +377,7 @@ static int tagFilter(CombineConfig *pConfig, ParserTag *ptag, char *tagBuf, buff
 			&& tmpChr != '\"'
 			&& tmpChr != '\''
 			&& (i < pConfig->maxUrlLen); i++) {
-		uriBuf->ptr[i] = tmpChr;
+		maxUrlBuf->ptr[i] = tmpChr;
 		if ('.' == tmpChr) {
 			++hasDo;
 		}
@@ -386,9 +386,9 @@ static int tagFilter(CombineConfig *pConfig, ParserTag *ptag, char *tagBuf, buff
 		//no .js/.css ext
 		return 0;
 	}
-	uriBuf->used = i++;
-	uriBuf->ptr[i] = ZERO_END;
-	return uriBuf->used;
+	maxUrlBuf->used = i++;
+	maxUrlBuf->ptr[i] = ZERO_END;
+	return maxUrlBuf->used;
 }
 
 static void addTag(CombineConfig *pConfig, int styleType, buffer *destBuf, buffer *uri, time_t version) {
