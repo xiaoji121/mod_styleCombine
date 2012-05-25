@@ -438,10 +438,8 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 			/**
 			 * if file combine not finished then wait 1 second
 			 */
+			log_error_write(srv, LDLOG_MARK,  "sb",  "--fileCombining sleep", combinedFullPath);
 			sleep(1);
-			if (con->conf.log_timeouts) {
-				log_error_write(srv, LDLOG_MARK,  "sb",  "--fileCombining sleep", combinedFullPath);
-			}
 		}
 	}
 
