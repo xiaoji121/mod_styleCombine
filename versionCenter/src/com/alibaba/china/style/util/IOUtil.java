@@ -171,7 +171,7 @@ public class IOUtil {
             if (null == robj) {
                 return null;
             }
-            if (robj instanceof List) {
+            if (robj instanceof Map) {
                 return (Map<String, FileDesc>) robj;
             }
         } catch (FileNotFoundException e) {

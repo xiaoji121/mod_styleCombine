@@ -120,6 +120,7 @@ public class StyleVersionImpl implements StyleVersion {
         if (1 == pConfig.getDebugModel()) {
             end = System.currentTimeMillis();
             System.out.println("merge const time: " + ((end - start)) + " ms");
+            System.out.println("isUpdate " + flag);
         }
         return flag;
     }

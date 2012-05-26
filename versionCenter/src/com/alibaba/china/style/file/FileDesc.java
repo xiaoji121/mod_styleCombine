@@ -134,4 +134,18 @@ public class FileDesc implements Serializable, Comparable<FileDesc> {
     public int compareTo(FileDesc o) {
         return this.path.compareTo(o.getPath());
     }
+
+    @Override
+    public String toString() {
+
+        StringBuilder buf = new StringBuilder();
+        buf.append("path:").append(path).append("\n");
+        buf.append("type:").append(type).append("\n");
+        buf.append("size:").append(size).append("\n");
+        buf.append("lastModified:").append(lastModified).append("\n");
+        buf.append("md5Sum:").append(md5Sum).append("\n");
+        buf.append("version:").append(version).append("\n");
+
+        return buf.toString();
+    }
 }
