@@ -154,7 +154,7 @@ public class StyleVersionImpl implements StyleVersion {
                 byte[] input = IOUtil.bytesRead(file.getAbsolutePath());
                 String md5Sum = md5sum(input);
 
-                long newVersion = Math.abs(md5Sum.hashCode());
+                long newVersion = Math.abs(md5Sum.hashCode()) + file.length();
                 /*
                  * if new version equals old version, need to fix the version
                  */
@@ -223,6 +223,14 @@ public class StyleVersionImpl implements StyleVersion {
             buf.append(s);
         }
         return buf.toString();
+    }
+
+    public static void main(String[] args) throws Exception {
+        String s = "/app/community/js/myhome/global/myhome-merge.js|/js/common/beacon.js";
+
+        s = md5sum(s.getBytes("GBK"));
+
+        System.out.println(s);
     }
 
     private static String getStyleVersionString(List<FileDesc> fileDescList) {

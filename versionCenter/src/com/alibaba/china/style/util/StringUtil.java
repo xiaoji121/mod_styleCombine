@@ -1,6 +1,9 @@
 package com.alibaba.china.style.util;
 
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.List;
 
 public final class StringUtil {
@@ -33,5 +36,27 @@ public final class StringUtil {
             list.add(s);
         }
         return list;
+    }
+
+    /**
+     * @param fileName
+     * @return
+     */
+    public static String fileNameOfDate(String fileName) {
+        java.util.Calendar cd = Calendar.getInstance();
+
+        DateFormat sdf = new SimpleDateFormat("yyyy_MM_dd_hh_mm");
+        String date = sdf.format(cd.getTime());
+
+        StringBuilder build = new StringBuilder();
+        build.append(fileName).append("_").append(date);
+
+        return build.toString();
+    }
+
+    public static void main(String args[]) {
+
+        System.out.println(fileNameOfDate("hello"));
+
     }
 }

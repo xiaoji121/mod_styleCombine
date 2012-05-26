@@ -11,6 +11,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import com.alibaba.china.style.config.StyleConfig;
 import com.alibaba.china.style.file.FileDesc;
 import com.alibaba.china.style.util.IOUtil;
+import com.alibaba.china.style.util.StringUtil;
 import com.alibaba.china.style.version.StyleVersion;
 import com.alibaba.china.style.version.impl.StyleVersionImpl;
 
@@ -52,7 +53,7 @@ public class StyleVersionProcessor {
             List<FileDesc> destList = new ArrayList<FileDesc>(fileDescList);
             Collections.sort(destList);
 
-            file = new File(path.toString());
+            file = new File(StringUtil.fileNameOfDate(path.toString()));
             boolean isBuilded = styleVersion.builderStyleVersion(file, destList);
             if (!isBuilded) {
                 // FIXME: builder error add log
