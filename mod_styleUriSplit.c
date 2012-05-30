@@ -147,7 +147,6 @@ static buffer *createFilePath(server *srv, connection *con, long lastModified) {
 	buffer *subUri = con->uri.path;
 
 	buffer *filePath = buffer_init();
-	buffer_prepare_append(filePath, 40);
 
 	int subUriLen = subUri->used - 1;
 	char *fileExt = NULL;
@@ -184,23 +183,27 @@ static buffer *createFilePath(server *srv, connection *con, long lastModified) {
 	return filePath;
 }
 
-static int fileCombining(server *srv, connection *con, fileObjectWrapper *fObjectWrapper, char *targetFile) {
+static int fileCombining(server *srv, connection *con, fileObjectWrapper *fObjectWrapper, buffer *targetFile) {
 
-	if (NULL == fObjectWrapper|| NULL == targetFile) {
+	if (NULL == fObjectWrapper|| NULL == targetFile || 0 == targetFile->used) {
 		return -1;
 	}
+	//the first write fileCont into tmpFile
+	buffer *targetFileTmp = buffer_init_buffer(targetFile);
+	buffer_append_string_len(targetFileTmp,"_tmp", 4);
 
 	int ifd, ofd, num;
 	char buf[IOBUF_SIZE];
 	fileObject *fObject = fObjectWrapper->fObject;
 
-	if(-1 == (ofd = open(targetFile, O_WRONLY|O_CREAT|O_EXCL, 0600))) {
+	if(-1 == (ofd = open(targetFileTmp->ptr, O_WRONLY|O_CREAT|O_EXCL, 0600))) {
+		buffer_free(targetFileTmp);
 		if(errno == EEXIST) {
 			//表示此文件已经有线程在进行写操作了。不需要进行重复的写
 			return 0;
 		}
 		if(con->conf.log_file_not_found) {
-			log_error_write(srv, LDLOG_MARK,  "ssss",  "-- fileWrite  ",targetFile ," error:", strerror(errno));
+			log_error_write(srv, LDLOG_MARK,  "sbss",  "--fileWrite  ",targetFileTmp ," error:", strerror(errno));
 		}
 		return -1;
 	}
@@ -208,21 +211,40 @@ static int fileCombining(server *srv, connection *con, fileObjectWrapper *fObjec
 	for(; NULL != fObject; fObject = fObject->prevItem) {
 		if (-1 == (ifd = open(fObject->filePath->ptr, O_RDONLY, 0600))){
 			if (con->conf.log_file_not_found) {
-				log_error_write(srv, LDLOG_MARK, "sbss", "inFilePath ",
+				log_error_write(srv, LDLOG_MARK, "sbss", "open inFilePath error",
 						fObject->filePath, " failed:", strerror(errno));
 			}
 			continue;
 		}
 		while((num = read(ifd, buf, IOBUF_SIZE)) > 0) {
 			if(write(ofd, buf, num) != num) {
-				log_error_write(srv, LDLOG_MARK, "sbssss", "sourceFile ", fObject->filePath,
-						                                   "targetFile:", targetFile,
+				log_error_write(srv, LDLOG_MARK, "sbsbss", "writeFile error ==> sourceFile ", fObject->filePath,
+						                                   "targetFile:", targetFileTmp,
 						                                   "failed:", strerror(errno));
 			}
 		}
 		close(ifd);
 	}
 	close(ofd);
+
+	/**
+	 * 将新合并后的文件最后修改时间，变更成当前文件的最后修改时间。
+	 * 同时写到head的last_modified中，用户其它模块生成Etag或修改时间比较保持统一。
+	 */
+	struct utimbuf newTime;
+	newTime.modtime = fObjectWrapper->																										lastModified;
+	if(-1 == utime(targetFileTmp->ptr, &newTime)) {
+		log_error_write(srv, LDLOG_MARK, "sbss", "utime error==>targetFileTmp:", targetFileTmp,
+												   "failed:", strerror(errno));
+	}
+
+	//将合并好的临时文件重命名成真正的文件名
+	if(-1 == rename(targetFileTmp->ptr, targetFile->ptr)) {
+		log_error_write(srv, LDLOG_MARK, "sbsbss", "rename error==>oldName ", targetFileTmp,
+												   "newName:", targetFile,
+												   "failed:", strerror(errno));
+	}
+	buffer_free(targetFileTmp);
 	return 1;
 }
 
@@ -420,16 +442,8 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 		combinedMtime = sce->st.st_mtime;
 	}
 	if(combinedMtime != fObjectWrapper.lastModified) {
-		int combinResult = fileCombining(srv, con, &fObjectWrapper, combinedFullPath->ptr);
+		int combinResult = fileCombining(srv, con, &fObjectWrapper, combinedFullPath);
 		if(1 == combinResult) {
-			/**
-			 * 将新合并后的文件最后修改时间，变更成当前文件的最后修改时间。
-			 * 同时写到head的last_modified中，用户其它模块生成Etag或修改时间比较保持统一。
-			 */
-			struct utimbuf newFileTime;
-			newFileTime.modtime = fObjectWrapper.lastModified;
-			utime(combinedFullPath->ptr, &newFileTime);
-
 			mtime = strftime_cache_get(srv, fObjectWrapper.lastModified);
 			response_header_overwrite(srv, con, CONST_STR_LEN("Content-Type"), CONST_BUF_LEN(fObjectWrapper.contentType));
 			response_header_overwrite(srv, con, CONST_STR_LEN("Last-Modified"), CONST_BUF_LEN(mtime));
