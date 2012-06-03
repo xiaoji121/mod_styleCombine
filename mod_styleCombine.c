@@ -34,7 +34,8 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 #define POSITION_TOP "top"
 #define POSITION_HEAD "head"
 #define POSITION_FOOTER "footer"
-#define DEBUG_MODE "debugMode=1"
+#define DEBUG_MODE "_debugMode_=1"
+#define RUN_MODE_STATUS "dis"
 #define JS_PREFIX_TXT "<script type=\"text/javascript\" src=\""
 #define JS_PREFIX_NEWLINE_TXT "\n<script type=\"text/javascript\" src=\""
 #define JS_SUFFIX_TXT "\"></script>"
@@ -65,6 +66,7 @@ volatile apr_pool_t   *globalPool = NULL;
 volatile apr_table_t  *styleTable = NULL;
 volatile apr_time_t    lastLoadTime;
 volatile __time_t      prevTime = 0;
+char                  *appRunMode = NULL;
 
 
 typedef struct {
@@ -93,6 +95,7 @@ typedef struct {
 	char      *versionFilePath;
 	int        maxUrlLen;
 	int        debugMode;
+	char      *appName;
 
 	//style combined auto not impl yet
 //	int        delBlankSpace;
@@ -353,6 +356,7 @@ static void loadStyleVersion(request_rec *r, CombineConfig *pConfig) {
 			if(NULL != oldPool) {
 				apr_pool_destroy(oldPool);
 			}
+			appRunMode = apr_table_get(styleTable, pConfig->appName);
 		}
 		apr_file_close(fd);
 	}
@@ -823,6 +827,7 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 	pConfig->enabled = 0;
 	pConfig->debugMode = 0;
 	pConfig->filterCntType = NULL;
+	pConfig->appName = "modCombine";
 	/**
 	 * see http://support.microsoft.com/kb/208427/EN-US
 	 * default len for ie 2083 char
@@ -924,16 +929,6 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 	conn_rec *c         = r->connection;
 	CombineCtx *ctx     = f->ctx;
 
-	if(NULL != r->parsed_uri.query) {
-		char *debugMode = strstr(r->parsed_uri.query, DEBUG_MODE);
-		if(NULL != debugMode) {
-			return ap_pass_brigade(f->next, pbbIn);
-		}
-	}
-
-	CombineConfig *pConfig = NULL;
-	pConfig = ap_get_module_config(r->server->module_config, &styleCombine_module);
-
 	if (APR_BRIGADE_EMPTY(pbbIn)) {
 		return APR_SUCCESS;
 	}
@@ -944,6 +939,10 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 	if(NULL != apr_table_get(r->notes, STYLE_COMBINE_NAME)) {
 		return ap_pass_brigade(f->next, pbbIn);
 	}
+
+	CombineConfig *pConfig = NULL;
+	pConfig = ap_get_module_config(r->server->module_config, &styleCombine_module);
+
 	if(NULL == pConfig) {
 		return ap_pass_brigade(f->next, pbbIn);
 	}
@@ -960,6 +959,19 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 			break;
 		}
 		if(!strstr(pConfig->filterCntType, contentType)) {
+			return ap_pass_brigade(f->next, pbbIn);
+		}
+	}
+
+	//1add runMode
+	if(NULL != appRunMode && 0 == memcmp(appRunMode, RUN_MODE_STATUS, 3)) {
+		loadStyleVersion(r, pConfig);
+		return ap_pass_brigade(f->next, pbbIn);
+	}
+	//2add debugMode
+	if(NULL != r->parsed_uri.query) {
+		char *debugMode = strstr(r->parsed_uri.query, DEBUG_MODE);
+		if(NULL != debugMode) {
 			return ap_pass_brigade(f->next, pbbIn);
 		}
 	}
@@ -1061,6 +1073,16 @@ static const char *setFilterCntType(cmd_parms *cmd, void *dummy, const char *arg
 	return NULL;
 }
 
+static const char *setAppName(cmd_parms *cmd, void *dummy, const char *arg) {
+	CombineConfig *pConfig = ap_get_module_config(cmd->server->module_config, &styleCombine_module);
+	if ((NULL == arg) || (strlen(arg) <= 1)) {
+		return "styleCombine appName can't be null OR empty";
+	} else {
+		pConfig->appName = apr_pstrdup(cmd->pool, arg);
+	}
+	return NULL;
+}
+
 static const char *setOldDomain(cmd_parms *cmd, void *dummy, const char *arg) {
 	CombineConfig *pConfig = ap_get_module_config(cmd->server->module_config, &styleCombine_module);
 	if ((NULL == arg) || (strlen(arg) <= 1)) {
@@ -1115,6 +1137,8 @@ static const char *setVersionFilePath(cmd_parms *cmd, void *dummy, const char *a
 static const command_rec styleCombineCmds[] =
 {
 		AP_INIT_FLAG("enabled", setEnabled, NULL, OR_ALL, "open or close this module"),
+
+		AP_INIT_TAKE1("appName", setAppName, NULL, OR_ALL, "app name"),
 
 		AP_INIT_TAKE1("filterCntType", setFilterCntType, NULL, OR_ALL, "filter content type"),
 
