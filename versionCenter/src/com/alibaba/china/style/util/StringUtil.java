@@ -45,7 +45,7 @@ public final class StringUtil {
     public static String fileNameOfDate(String fileName) {
         java.util.Calendar cd = Calendar.getInstance();
 
-        DateFormat sdf = new SimpleDateFormat("yyyy_MM_dd_hh_mm");
+        DateFormat sdf = new SimpleDateFormat("yyyy_MM_dd_HH");
         String date = sdf.format(cd.getTime());
 
         StringBuilder build = new StringBuilder();
