@@ -383,6 +383,10 @@ static int tagFilter(CombineConfig *pConfig, ParserTag *ptag, char *maxTagBuf, b
 			&& tmpChr != '\"'
 			&& tmpChr != '\''
 			&& (i < pConfig->maxUrlLen); i++) {
+
+		if(isspace(tmpChr)) {
+			continue;
+		}
 		maxUrlBuf->ptr[i] = tmpChr;
 		if ('.' == tmpChr) {
 			++hasDo;
@@ -775,7 +779,7 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 			}
 		}
 		//clean \r\n \n \t & empty char
-		while(' ' == *curPoint || '\n' == *curPoint || '\r' == *curPoint || '\t' == *curPoint) {
+		while(isspace(*curPoint)) {
 			++curPoint;
 		}
 		subHtml = curPoint;
