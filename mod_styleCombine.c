@@ -34,10 +34,9 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 #define POSITION_TOP "top"
 #define POSITION_HEAD "head"
 #define POSITION_FOOTER "footer"
-#define DEBUG_MODE "_debugMode_=1"
+#define DEBUG_MODE "_debugMode_="
 #define RUN_MODE_STATUS "dis"
 #define JS_PREFIX_TXT "<script type=\"text/javascript\" src=\""
-#define JS_PREFIX_NEWLINE_TXT "\n<script type=\"text/javascript\" src=\""
 #define JS_SUFFIX_TXT "\"></script>"
 #define CSS_PREFIX_TXT "<link rel=\"stylesheet\" href=\""
 #define CSS_SUFFIX_TXT "\" />"
@@ -47,10 +46,10 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 #define DEFAULT_CONTENT_LEN (1024 << 10)// default html content size 1M
 
 int JS_PREFIX_TXT_LEN = 0;
-int JS_PREFIX_NEWLINE_TXT_LEN = 0;
 int JS_SUFFIX_TXT_LEN = 0;
 int CSS_PREFIX_TXT_LEN = 0;
 int CSS_SUFFIX_TXT_LEN = 0;
+int DEBUG_MODE_LEN = 12;
 
 /***********global variable************/
 const char ZERO_END = '\0';
@@ -94,7 +93,7 @@ typedef struct {
 	buffer    *newDomain;
 	char      *versionFilePath;
 	int        maxUrlLen;
-	int        debugMode;
+	int        logMode;
 	char      *appName;
 
 	//style combined auto not impl yet
@@ -103,6 +102,7 @@ typedef struct {
 } CombineConfig;
 
 typedef struct {
+	int                 debugMode;
 	buffer             *buf;
     apr_bucket_brigade *pbbOut;
 } CombineCtx;
@@ -321,7 +321,7 @@ static void loadStyleVersion(request_rec *r, CombineConfig *pConfig) {
 	apr_status_t rc = apr_stat(&finfo, pConfig->versionFilePath, APR_FINFO_MIN, pool);
 
 	if(APR_SUCCESS == rc && finfo.mtime != lastLoadTime) {
-		if(pConfig->debugMode) {
+		if(pConfig->logMode) {
 			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
 					"==reload styleVersion File lastLoadTime: %ld == fmtime:%ld", lastLoadTime, finfo.mtime);
 		}
@@ -405,11 +405,13 @@ static void addTag(CombineConfig *pConfig, int styleType, buffer *destBuf, buffe
 	if(NULL == destBuf || NULL == uri || !uri->used) {
 		return ;
 	}
+	//add new line
+	if(newLine) {
+		char newLineValue[] = "\n";
+		stringAppend(destBuf, newLineValue, 1);
+	}
 	if (0 == styleType) {
 		stringAppend(destBuf, CSS_PREFIX_TXT, CSS_PREFIX_TXT_LEN);
-	} else if(newLine) {
-		//add \n at style tag in head
-		stringAppend(destBuf, JS_PREFIX_NEWLINE_TXT, JS_PREFIX_NEWLINE_TXT_LEN);
 	} else {
 		stringAppend(destBuf, JS_PREFIX_TXT, JS_PREFIX_TXT_LEN);
 	}
@@ -431,6 +433,9 @@ static void addTag(CombineConfig *pConfig, int styleType, buffer *destBuf, buffe
 	return;
 }
 
+/**
+ * 将js/css列表合并成一个url,并放到相应的位置上去
+ */
 static void combineStyles(CombineConfig *pConfig, int styleType, StyleLinkList *linkList,
 								CombinedStyle *combinedStyle, CombinedStyle *tmpCombine) {
 	if(NULL == linkList) {
@@ -505,6 +510,32 @@ static void combineStyles(CombineConfig *pConfig, int styleType, StyleLinkList *
 	addTag(pConfig, styleType, combinedStyle->topBuf, tmpCombine->topBuf, topVersion, 1);
 	addTag(pConfig, styleType, combinedStyle->headBuf, tmpCombine->headBuf, headVersion, 1);
 	addTag(pConfig, styleType, combinedStyle->footerBuf, tmpCombine->footerBuf, footerVersion, 1);
+	return;
+}
+
+/**
+ * 用于开发时，打开调试模块调用。将js/css的位置做移动，但不做合并
+ */
+static void combineStylesDebug(CombineConfig *pConfig, int styleType, StyleLinkList *linkList,
+								CombinedStyle *combinedStyle) {
+	if(NULL == linkList) {
+		return;
+	}
+	for (; NULL != linkList; linkList = linkList->prevItem) {
+		switch (linkList->postion) {
+			case 't': //top
+				addTag(pConfig, styleType, combinedStyle->topBuf, linkList->styleUri, linkList->version, 1);
+				break;
+			case 'h': //head
+				addTag(pConfig, styleType, combinedStyle->headBuf, linkList->styleUri, linkList->version, 1);
+				break;
+			case 'f': //footer
+				addTag(pConfig, styleType, combinedStyle->footerBuf, linkList->styleUri, linkList->version, 1);
+				break;
+			default:
+				break;
+		}
+	}
 	return;
 }
 
@@ -613,7 +644,7 @@ static inline char *strSearch(const char * str1, char **matchedType, char **isEx
 	return (NULL);
 }
 
-static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstBuf, CombineConfig *pConfig, buffer *sourceCnt) {
+static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstBuf, CombineConfig *pConfig, CombineCtx *ctx) {
 
 	char *maxTagBuf = apr_palloc(r->pool, pConfig->maxUrlLen + 100);
 	if(NULL == maxTagBuf) {
@@ -629,7 +660,7 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 	StyleLinkList *jsPrevLinkList = NULL;
 	StyleLinkList *cssPrevLinkList = NULL;
 
-	char *subHtml = sourceCnt->ptr;
+	char *subHtml = ctx->buf->ptr;
 	int maxTagSize = (pConfig->maxUrlLen + 98);
 	char *matchedType = NULL;
 	char *isExpression = "0";
@@ -666,7 +697,7 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 		}
 		isProcessed = 1;
 
-		if(pConfig->debugMode) {
+		if(pConfig->logMode) {
 			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "=maxTagBuf:[%s] maxUrlBuf:[%s]", maxTagBuf, maxUrlBuf->ptr);
 		}
 
@@ -729,13 +760,13 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 		if (NULL != strstr(maxUrlBuf->ptr, URI_SEPARATOR)) {
 			switch (position) {
 				case 't': //top
-					addTag(pConfig, ptag->styleType, combinedStyle->topBuf, maxUrlBuf, nversion, 0);
+					addTag(pConfig, ptag->styleType, combinedStyle->topBuf, maxUrlBuf, nversion, 1);
 					break;
 				case 'h'://head
-					addTag(pConfig, ptag->styleType, combinedStyle->headBuf, maxUrlBuf, nversion, 0);
+					addTag(pConfig, ptag->styleType, combinedStyle->headBuf, maxUrlBuf, nversion, 1);
 					break;
 				case 'f'://footer
-					addTag(pConfig, ptag->styleType, combinedStyle->footerBuf, maxUrlBuf, nversion, 0);
+					addTag(pConfig, ptag->styleType, combinedStyle->footerBuf, maxUrlBuf, nversion, 1);
 					break;
 				default:
 					break;
@@ -785,26 +816,32 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 		subHtml = curPoint;
 	}
 	if(isProcessed) {
+		//append the tail html
 		stringAppend(dstBuf, subHtml, strlen(subHtml));
-		//create
-		CombinedStyle tmpCombine;
-		tmpCombine.topBuf = buffer_init();
-		tmpCombine.headBuf = buffer_init();
-		tmpCombine.footerBuf = buffer_init();
-		if(!tmpCombine.topBuf || !tmpCombine.headBuf || !tmpCombine.footerBuf) {
-			//app has error now skip this processer
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "if(isProcessed){has Error}:[%s]", r->unparsed_uri);
-			return 0;
+		if(0 == ctx->debugMode) {
+			//create
+			CombinedStyle tmpCombine;
+			tmpCombine.topBuf = buffer_init();
+			tmpCombine.headBuf = buffer_init();
+			tmpCombine.footerBuf = buffer_init();
+			if(!tmpCombine.topBuf || !tmpCombine.headBuf || !tmpCombine.footerBuf) {
+				//app has error now skip this processer
+				ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "if(isProcessed){has Error}:[%s]", r->unparsed_uri);
+				return 0;
+			}
+			combineStyles(pConfig, cssPtag->styleType, cssLinkList, combinedStyle, &tmpCombine);
+			//reset
+			tmpCombine.topBuf->used = 0;
+			tmpCombine.headBuf->used = 0;
+			tmpCombine.footerBuf->used = 0;
+			combineStyles(pConfig, jsPtag->styleType, jsLinkList, combinedStyle, &tmpCombine);
+			//free
+			combinedStyle_free(&tmpCombine);
+		} else if(2 == ctx->debugMode){
+			//debug mode 2
+			combineStylesDebug(pConfig, cssPtag->styleType, cssLinkList, combinedStyle);
+			combineStylesDebug(pConfig, jsPtag->styleType, jsLinkList, combinedStyle);
 		}
-		combineStyles(pConfig, cssPtag->styleType, cssLinkList, combinedStyle, &tmpCombine);
-		//reset
-		tmpCombine.topBuf->used = 0;
-		tmpCombine.headBuf->used = 0;
-		tmpCombine.footerBuf->used = 0;
-
-		combineStyles(pConfig, jsPtag->styleType, jsLinkList, combinedStyle, &tmpCombine);
-		//free
-		combinedStyle_free(&tmpCombine);
 	}
 	if(NULL != duplicates) {
 		apr_hash_clear(duplicates);
@@ -823,13 +860,12 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 		return NULL;
 	}
 	JS_PREFIX_TXT_LEN = strlen(JS_PREFIX_TXT);
-	JS_PREFIX_NEWLINE_TXT_LEN = strlen(JS_PREFIX_NEWLINE_TXT);
 	JS_SUFFIX_TXT_LEN = strlen(JS_SUFFIX_TXT);
 	CSS_PREFIX_TXT_LEN = strlen(CSS_PREFIX_TXT);
 	CSS_SUFFIX_TXT_LEN = strlen(CSS_SUFFIX_TXT);
 
 	pConfig->enabled = 0;
-	pConfig->debugMode = 0;
+	pConfig->logMode = 0;
 	pConfig->filterCntType = NULL;
 	pConfig->appName = "modCombine";
 	/**
@@ -930,8 +966,8 @@ static void styleCombineInsert(request_rec *r) {
 static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade *pbbIn) {
 
 	request_rec *r      = f->r;
-	conn_rec *c         = r->connection;
-	CombineCtx *ctx     = f->ctx;
+	conn_rec    *c      = r->connection;
+	CombineCtx  *ctx    = f->ctx;
 
 	if (APR_BRIGADE_EMPTY(pbbIn)) {
 		return APR_SUCCESS;
@@ -967,16 +1003,30 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 		}
 	}
 
-	//1add runMode
+	/**
+	 * 1add runMode
+	 * 添加模块的动态开关，由版本文件内容来控制
+	 */
 	if(NULL != appRunMode && 0 == memcmp(appRunMode, RUN_MODE_STATUS, 3)) {
 		loadStyleVersion(r, pConfig);
 		return ap_pass_brigade(f->next, pbbIn);
 	}
-	//2add debugMode
+	/**
+	 * 2add debugMode
+	 * 本次请求禁用此模块，用于开发调试使用
+	 */
+	int debugMode = 0;
 	if(NULL != r->parsed_uri.query) {
-		char *debugMode = strstr(r->parsed_uri.query, DEBUG_MODE);
-		if(NULL != debugMode) {
-			return ap_pass_brigade(f->next, pbbIn);
+		char *debugModeParam = strstr(r->parsed_uri.query, DEBUG_MODE);
+		if(NULL != debugModeParam) {
+			debugModeParam += DEBUG_MODE_LEN;
+			if(*debugModeParam == '1') {
+				debugMode = 1;
+				return ap_pass_brigade(f->next, pbbIn);
+			}
+			if(*debugModeParam == '2') {
+				debugMode = 2;
+			}
 		}
 	}
 
@@ -993,6 +1043,8 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 		if(NULL == ctx->buf) {
 			return ap_pass_brigade(f->next, pbbIn);
 		}
+		//set debugMode value
+		ctx->debugMode = debugMode;
 	}
 
 	int isEOS = 0;
@@ -1017,7 +1069,7 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 	if(!isEOS) {
 		return OK;
 	}
-	if(pConfig->debugMode) {
+	if(pConfig->logMode) {
 		time_t start = 0;
 		time(&start);
 		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "======styleCombine process: %s == %ld", r->uri, start);
@@ -1035,7 +1087,7 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 		buffer *dstBuf = buffer_init_size(ctx->buf->used);
 		if(dstBuf && combinedStyle.footerBuf && combinedStyle.topBuf && combinedStyle.headBuf) {
 			//if find any style
-			if(htmlParser(r, &combinedStyle, dstBuf, pConfig, ctx->buf)) {
+			if(htmlParser(r, &combinedStyle, dstBuf, pConfig, ctx)) {
 				resetHtml(c, ctx->pbbOut, &combinedStyle, dstBuf);
 			} else {
 				addBucket(c, ctx->pbbOut, ctx->buf->ptr, ctx->buf->used);
@@ -1053,7 +1105,7 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 	buffer_free(ctx->buf);
 	apr_brigade_cleanup(pbbIn);
 
-	if(pConfig->debugMode) {
+	if(pConfig->logMode) {
 		time_t end = 0;
 		time(&end);
 		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "========styleCombine end: %s == %ld", r->uri, end);
@@ -1122,9 +1174,9 @@ static const char *setMaxUrlLen(cmd_parms *cmd, void *dummy, const char *arg) {
 	return NULL;
 }
 
-static const char *setDebugMode(cmd_parms *cmd, void *dummy, int arg) {
+static const char *setLogMode(cmd_parms *cmd, void *dummy, int arg) {
 	CombineConfig *pConfig = ap_get_module_config(cmd->server->module_config, &styleCombine_module);
-	pConfig->debugMode = arg;
+	pConfig->logMode = arg;
 	return NULL;
 }
 
@@ -1152,7 +1204,7 @@ static const command_rec styleCombineCmds[] =
 
 		AP_INIT_TAKE1("maxUrlLen", setMaxUrlLen, NULL, OR_ALL, "url max len"),
 
-		AP_INIT_TAKE1("debugMode", setDebugMode, NULL, OR_ALL, " debug mode"),
+		AP_INIT_TAKE1("logMode", setLogMode, NULL, OR_ALL, " debug mode"),
 
 		// part version command
 		AP_INIT_TAKE1("versionFilePath", setVersionFilePath, NULL, OR_ALL, "style versionFilePath dir"),
