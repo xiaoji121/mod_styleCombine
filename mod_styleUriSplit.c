@@ -212,7 +212,7 @@ static int fileCombining(server *srv, connection *con, fileObjectWrapper *fObjec
 	 * 同时写到head的last_modified中，用户其它模块生成Etag或修改时间比较保持统一。
 	 */
 	struct utimbuf newTime;
-	newTime.modtime = fObjectWrapper->																										lastModified;
+	newTime.modtime = fObjectWrapper->lastModified;
 	if(-1 == utime(targetFileTmp->ptr, &newTime)) {
 		log_error_write(srv, LDLOG_MARK, "sbss", "utime error==>targetFileTmp:", targetFileTmp,
 												   "failed:", strerror(errno));
@@ -235,7 +235,6 @@ static void uriSplit(server *srv, connection *con, fileObjectWrapper *fObjectWra
 	stat_cache_entry *sce = NULL;
 	time_t lastModified = 0;
 	buffer *uriBuf = buffer_init_buffer(con->uri.path);
-
 	char *value = NULL;
 	while(NULL != (value = strsep(&uriBuf->ptr, URI_SEPARATOR))) {
 		// /home/admin/www_cn/htdocs
@@ -338,11 +337,9 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 		return HANDLER_ERROR;
 	}
 	//如果 doc_root最后面没有 “/” 则需要加上
-	buffer *fixedDocRoot =  buffer_init();
+	buffer *fixedDocRoot =  buffer_init_buffer(con->conf.document_root);
 	if('/' != con->conf.document_root->ptr[con->conf.document_root->used - 2]) {
 		buffer_append_string_len(fixedDocRoot, "/", 1);
-	} else {
-		buffer_copy_string_buffer(fixedDocRoot, con->conf.document_root);
 	}
 
 	//uri 做分割操作
@@ -435,6 +432,7 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 	buffer_free(fixedDocRoot);
 	buffer_free(filePath);
 	buffer_free(combinedFullPath);
+	buffer_free(fObjectWrapper.fileExt);
 
 	fileObject *freeObject = fObjectWrapper.fObject;
 	while (NULL != freeObject) {
