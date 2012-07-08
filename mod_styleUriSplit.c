@@ -235,9 +235,11 @@ static void uriSplit(server *srv, connection *con, fileObjectWrapper *fObjectWra
 	fileObject *prevItem = NULL;
 	stat_cache_entry *sce = NULL;
 	time_t lastModified = 0;
-	buffer *uriBuf = buffer_init_buffer(con->uri.path);
-	char *value = NULL;
-	while(NULL != (value = strsep(&uriBuf->ptr, URI_SEPARATOR))) {
+
+	char *sourceUri = strndup(con->uri.path->ptr, con->uri.path->used - 1);
+	char *value = NULL, *tmpUri = sourceUri;
+
+	while(NULL != (value = strsep(&tmpUri, URI_SEPARATOR))) {
 		// /home/admin/www_cn/htdocs
 		buffer *absFilePath = buffer_init_buffer(docRoot);
 		// /js/a.js
@@ -281,7 +283,7 @@ static void uriSplit(server *srv, connection *con, fileObjectWrapper *fObjectWra
 	fObjectWrapper->fObject = firstItem;
 	fObjectWrapper->lastModified = lastModified;
 
-	buffer_free(uriBuf);
+	free(sourceUri);
 }
 
 int http_response_cachable(server *srv, connection *con, buffer *mtime) {
