@@ -55,7 +55,7 @@ typedef struct {
  */
 typedef struct {
 	buffer *filePath;
-	struct fileObject *prevItem;
+	struct fileObject *nextItem;
 
 } fileObject;
 
@@ -170,7 +170,7 @@ static int fileCombining(server *srv, connection *con, fileObjectWrapper *fObjec
 	}
 	//the first write fileCont into tmpFile
 	buffer *targetFileTmp = buffer_init_buffer(targetFile);
-	buffer_append_string_len(targetFileTmp,"_tmp", 4);
+	buffer_append_string_len(targetFileTmp, "_tmp", 4);
 
 	int ifd, ofd, num;
 	char buf[IOBUF_SIZE];
@@ -188,7 +188,7 @@ static int fileCombining(server *srv, connection *con, fileObjectWrapper *fObjec
 		return -1;
 	}
 
-	for(; NULL != fObject; fObject = fObject->prevItem) {
+	for(; NULL != fObject; fObject = fObject->nextItem) {
 		if (-1 == (ifd = open(fObject->filePath->ptr, O_RDONLY, 0600))){
 			if (con->conf.log_file_not_found) {
 				log_error_write(srv, LDLOG_MARK, "sbss", "open inFilePath error",
@@ -212,6 +212,7 @@ static int fileCombining(server *srv, connection *con, fileObjectWrapper *fObjec
 	 * 同时写到head的last_modified中，用户其它模块生成Etag或修改时间比较保持统一。
 	 */
 	struct utimbuf newTime;
+	newTime.modtime = fObjectWrapper->lastModified;
 	newTime.modtime = fObjectWrapper->lastModified;
 	if(-1 == utime(targetFileTmp->ptr, &newTime)) {
 		log_error_write(srv, LDLOG_MARK, "sbss", "utime error==>targetFileTmp:", targetFileTmp,
@@ -260,13 +261,13 @@ static void uriSplit(server *srv, connection *con, fileObjectWrapper *fObjectWra
 		}
 
 		fileObject *fObjectItem = malloc(sizeof(fileObject));
-		fObjectItem->prevItem = NULL;
+		fObjectItem->nextItem = NULL;
 		fObjectItem->filePath = absFilePath;
 		if(NULL == firstItem) {
 			firstItem = fObjectItem;
 			fObjectWrapper->contentType = sce->content_type;
 		} else {
-			prevItem->prevItem = fObjectItem;
+			prevItem->nextItem = fObjectItem;
 		}
 		prevItem = fObjectItem;
 		if (lastModified < sce->st.st_mtime) {
@@ -427,7 +428,6 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 		log_error_write(srv, __FILE__, __LINE__,  "sb", "Path         :", con->physical.path);
 		log_error_write(srv, __FILE__, __LINE__,  "sb", "URI         :", con->uri.path);
 	}
-
 	//free no used buff
 	buffer_free(fixedDocRoot);
 	buffer_free(filePath);
@@ -438,7 +438,7 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 	while (NULL != freeObject) {
 		fileObject *tmpFreeObject = freeObject;
 		buffer_free(tmpFreeObject->filePath);
-		freeObject = freeObject->prevItem;
+		freeObject = freeObject->nextItem;
 		free(tmpFreeObject);
 	}
 	return HANDLER_GO_ON;
