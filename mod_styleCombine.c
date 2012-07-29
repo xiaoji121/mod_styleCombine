@@ -42,7 +42,7 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 #define CSS_SUFFIX_TXT "\" />"
 
 #define URI_VERSION_LEN  30
-#define DEFAULT_BUF_SIZE 128
+#define BUFFER_PIECE_SIZE 128
 #define DEFAULT_CONTENT_LEN (1024 << 10)// default html content size 1M
 
 int JS_PREFIX_TXT_LEN = 0;
@@ -54,9 +54,9 @@ int DEBUG_MODE_LEN = 12;
 /***********global variable************/
 const char ZERO_END = '\0';
 /*position char */
-typedef enum PositionEnum{TOP, HEAD, FOOTER, NONE};
+enum PositionEnum{TOP, HEAD, FOOTER, NONE};
 
-int styleTableSize = 30000;
+int styleTableSize = 40000;
 
 volatile apr_pool_t   *globalPool = NULL;
 volatile apr_table_t  *styleTable = NULL;
@@ -82,6 +82,7 @@ typedef struct {
 
 ParserTag             *cssPtag;
 ParserTag             *jsPtag;
+server_rec            *server;
 
 typedef struct {
 	int        enabled;
@@ -118,6 +119,14 @@ typedef struct {
 	buffer *footerBuf;
 } CombinedStyle;
 
+static void printf_log(buffer *buf, char *str) {
+//	char strBuf[10240];
+//	memset(strBuf,0,10240);
+//	sprintf(&strBuf,str,buf,buf->ptr,buf->size,buf->used);
+//	ap_log_error(APLOG_MARK, APLOG_ERR, 0, server, "%s", strBuf);
+	return ;
+}
+
 buffer *buffer_init() {
 	buffer *buf = malloc(sizeof(buffer));
 	if(NULL == buf) {
@@ -126,6 +135,7 @@ buffer *buffer_init() {
 	buf->ptr = NULL;
 	buf->used = 0;
 	buf->size = 0;
+	printf_log(buf, "buffer_init: buf=%p  ptr=%p size=%ld used=%ld");
 	return buf;
 }
 
@@ -133,6 +143,7 @@ void buffer_free(buffer *b) {
 	if(NULL == b) {
 		return;
 	}
+	printf_log(b, "buffer_free: buf=%p  ptr=%p size=%ld used=%ld");
 	free(b->ptr);
 	free(b);
 	return;
@@ -149,7 +160,16 @@ buffer *buffer_init_size(int size) {
 		return NULL;
 	}
 	buf->size = size;
+	printf_log(buf, "buffer_init_size: buf=%p  ptr=%p size=%ld used=%ld");
 	return buf;
+}
+
+void buffer_clean(buffer *buf) {
+	if(NULL == buf) {
+		return;
+	}
+	buf->used = 0;
+	buf->ptr[0]=ZERO_END;
 }
 
 void combinedStyle_free(CombinedStyle *c) {
@@ -183,38 +203,43 @@ static void stringAppend(buffer *buf, char *str, int strLen) {
 		return;
 	}
 	if(0 == buf->size) {
-		if(strLen > DEFAULT_BUF_SIZE) {
-			buf->size = strLen + DEFAULT_BUF_SIZE;
+		if(strLen > BUFFER_PIECE_SIZE) {
+			buf->size = strLen + BUFFER_PIECE_SIZE;
 		} else {
-			buf->size = DEFAULT_BUF_SIZE;
+			buf->size = BUFFER_PIECE_SIZE;
 		}
 		buf->ptr = malloc(buf->size);
 		buf->used = 0;
+		printf_log(buf, "stringAppend malloc: buf=%p  ptr=%p size=%ld used=%ld");
 	}
 	if(buf->used + strLen >= buf->size) {
-		buf->size += (strLen + DEFAULT_BUF_SIZE);
+		printf_log(buf, "stringAppend old realloc: buf=%p  ptr=%p size=%ld used=%ld");
+		buf->size += (strLen + BUFFER_PIECE_SIZE);
 		buf->ptr = realloc(buf->ptr, buf->size);
+		printf_log(buf, "stringAppend new realloc: buf=%p  ptr=%p size=%ld used=%ld");
 	}
 	memcpy(buf->ptr + buf->used, str, strLen);
 	buf->used += strLen;
+	buf->ptr[buf->used + 1] = ZERO_END;
 	return;
 }
 
-static void formatParser(apr_table_t *table, char *str) {
+static void formatParser(apr_table_t *table, char *str, server_rec *server) {
 	if (NULL == str || NULL == table) {
 		return;
 	}
 	char *name = NULL, *value = NULL;
 	char *srcStr = str;
 	char *strLine = NULL;
-
 	while (NULL != (strLine = strsep(&srcStr, "\n"))) {
 		name = strsep(&strLine, "=");
 		if (NULL == name || strlen(name) <= 1) {
 			continue;
 		}
 		value = strLine;
-		if (NULL == value || strlen(value) <= 1) {
+		if (NULL == value || strlen(value) < 1) {
+			ap_log_error(APLOG_MARK, APLOG_ERR, 0, server,
+					"formatParser value error value=[%s],strLine=[%s]", value, strLine);
 			continue;
 		}
 		apr_table_set(table, name, value);
@@ -325,6 +350,7 @@ static void loadStyleVersion(request_rec *r, CombineConfig *pConfig) {
 		rc = apr_file_open(&fd, pConfig->versionFilePath, APR_READ | APR_BINARY | APR_XTHREAD,
 						   APR_OS_DEFAULT, pool);
 		if(rc != APR_SUCCESS) {
+			apr_file_close(fd);
 		 	return;
 		}
 		amt = (apr_size_t)finfo.size;
@@ -332,6 +358,7 @@ static void loadStyleVersion(request_rec *r, CombineConfig *pConfig) {
 		char         *versionBuf = apr_pcalloc(pool, amt + 1);
 
 		if(NULL == versionBuf) {
+			apr_file_close(fd);
 			return;
 		}
 		rc = apr_file_read(fd, versionBuf, &amt);
@@ -340,12 +367,12 @@ static void loadStyleVersion(request_rec *r, CombineConfig *pConfig) {
 			apr_pool_t *newPool = NULL;
 			apr_pool_create(&newPool, r->server->process->pool);
 			if(NULL == newPool) {
+				apr_file_close(fd);
 				return ;
 			}
 			newTable = apr_table_make(newPool, styleTableSize);
-			formatParser(newTable, versionBuf);
+			formatParser(newTable, versionBuf, r->server);
 			styleTable = newTable;
-
 			apr_pool_t *oldPool = globalPool;
 			globalPool = newPool;
 			//free old pool
@@ -436,7 +463,7 @@ static void addTag(CombineConfig *pConfig, int styleType, buffer *destBuf,
 		stringAppend(destBuf, EXT_JS, 3);
 		stringAppend(destBuf, JS_SUFFIX_TXT, JS_SUFFIX_TXT_LEN);
 	}
-	destBuf->ptr[destBuf->used] = ZERO_END;
+	//destBuf->ptr[destBuf->used] = ZERO_END;
 	return;
 }
 
@@ -706,10 +733,6 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 		}
 		isProcessed = 1;
 
-		if(pConfig->logMode) {
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "=maxTagBuf:[%s] maxUrlBuf:[%s]", maxTagBuf, maxUrlBuf->ptr);
-		}
-
 		//清除uri后面带的参数
 		if(pConfig->enableFilterURLParams) {
 			char *paramPos = strchr(maxUrlBuf->ptr, '?');
@@ -836,12 +859,22 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 		//append the tail html
 		int subHtmlLen = (ctx->buf->ptr + ctx->buf->used) - subHtml;
 		stringAppend(dstBuf, subHtml, subHtmlLen);
+
 		if(0 == ctx->debugMode) {
 			//create
+			int combinBufSize = 0;
+			if(NULL != cssLinkList && cssLinkList->size > 0) {
+				combinBufSize = cssLinkList->size;
+			}
+			if(NULL != jsLinkList && jsLinkList->size > combinBufSize) {
+				combinBufSize = jsLinkList->size;
+			}
+			combinBufSize *= 50;
+
 			CombinedStyle tmpCombine;
-			tmpCombine.topBuf = buffer_init();
-			tmpCombine.headBuf = buffer_init();
-			tmpCombine.footerBuf = buffer_init();
+			tmpCombine.topBuf = buffer_init_size(combinBufSize);
+			tmpCombine.headBuf = buffer_init_size(combinBufSize);
+			tmpCombine.footerBuf = buffer_init_size(combinBufSize);
 			if(!tmpCombine.topBuf || !tmpCombine.headBuf || !tmpCombine.footerBuf) {
 				//app has error now skip this processer
 				ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "if(isProcessed){has Error}:[%s]", r->unparsed_uri);
@@ -849,9 +882,9 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 			}
 			combineStyles(pConfig, cssPtag->styleType, cssLinkList, combinedStyle, &tmpCombine);
 			//reset
-			tmpCombine.topBuf->used = 0;
-			tmpCombine.headBuf->used = 0;
-			tmpCombine.footerBuf->used = 0;
+			buffer_clean(tmpCombine.topBuf);
+			buffer_clean(tmpCombine.headBuf);
+			buffer_clean(tmpCombine.footerBuf);
 			combineStyles(pConfig, jsPtag->styleType, jsLinkList, combinedStyle, &tmpCombine);
 			//free
 			combinedStyle_free(&tmpCombine);
@@ -987,6 +1020,7 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 	request_rec *r      = f->r;
 	conn_rec    *c      = r->connection;
 	CombineCtx  *ctx    = f->ctx;
+	server = r->server;
 
 	if (APR_BRIGADE_EMPTY(pbbIn)) {
 		return APR_SUCCESS;
@@ -1091,7 +1125,7 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 	if(pConfig->logMode) {
 		time_t start = 0;
 		time(&start);
-		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "======styleCombine process: %s == %ld", r->uri, start);
+		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "======styleCombine start process: %s == %ld", r->uri, start);
 	}
 	if(ctx->buf->used > 0) {
 		ctx->buf->ptr[ctx->buf->used] = ZERO_END;
@@ -1229,7 +1263,7 @@ static const command_rec styleCombineCmds[] =
 
 		AP_INIT_TAKE1("maxUrlLen", setMaxUrlLen, NULL, OR_ALL, "url max len"),
 
-		AP_INIT_TAKE1("logMode", setLogMode, NULL, OR_ALL, " debug mode"),
+		AP_INIT_FLAG("logMode", setLogMode, NULL, OR_ALL, " debug mode"),
 
 		AP_INIT_FLAG("enableFilterURLParams", setEnableFilterURLParams, NULL, OR_ALL, "open or close this module to process filter uri?xx=xx"),
 
