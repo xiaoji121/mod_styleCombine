@@ -1,12 +1,9 @@
 #!/bin/bash
 
 gzip=`which gzip`
-STYLE_DOMAIN="http://172.22.9.69"
-DOWNLOAD_DIR="${forum_output}"
+STYLE_DOMAIN="$0"
+DOWNLOAD_DIR="$1"
 STYLE_VERSION_URI="styleVersion" 
-
-#default 2 minutes
-interval="2m"
 
 lastModified=""
 httpStatus=0
@@ -44,15 +41,15 @@ checkAndUngzip() {
 	
 	getHttpStatus $RESPONSE_LOG
         
-    ##Èç¹û·µ»ØµÄÄÚÈİÊÇhtmlÄÚÈİÔò±íÊ¾³ö´í£¬²»½«°æ±¾ÎÄ¼şÌæ»»£»Èç¹ûÏÂÔØ³É¹¦grep ¶ş½øÖÆÎÄ¼şÔò»á±¨´í£¬ËùÒÔÌí¼Ó-vÈ¥³ı´íÎó
+    ##å¦‚æœè¿”å›çš„å†…å®¹æ˜¯htmlå†…å®¹åˆ™è¡¨ç¤ºå‡ºé”™ï¼Œä¸å°†ç‰ˆæœ¬æ–‡ä»¶æ›¿æ¢ï¼›å¦‚æœä¸‹è½½æˆåŠŸgrep äºŒè¿›åˆ¶æ–‡ä»¶åˆ™ä¼šæŠ¥é”™ï¼Œæ‰€ä»¥æ·»åŠ -vå»é™¤é”™è¯¯
     isHtml=`cat ${DOWNLOAD_DIR_FILE_TMP} | head -10| grep "<" | grep -v "Binary file"`
 
-	##http×´Ì¬·µ»Ø200±íÊ¾ÕıÈ·£¬Èç¹ûÊÇ304»òÆäËüÔò²»×öÈÎºÎ´¦Àí    
+	##httpçŠ¶æ€è¿”å›200è¡¨ç¤ºæ­£ç¡®ï¼Œå¦‚æœæ˜¯304æˆ–å…¶å®ƒåˆ™ä¸åšä»»ä½•å¤„ç†    
     if [ $httpStatus -eq 200 ] && [ -z "$isHtml" ]; then
-    	## ½«tmpÎÄ¼şĞŞ¸Ä³É¿ÉÓÃÎÄ¼ş
+    	## å°†tmpæ–‡ä»¶ä¿®æ”¹æˆå¯ç”¨æ–‡ä»¶
         mv ${DOWNLOAD_DIR_FILE_TMP} ${DOWNLOAD_DIR_FILE}
         
-        ##½«ÎÄ¼ş¼õÑ¹µ½ ${UNGZIP_DIR_FILE} Ä¿Â¼ÎÄ¼şÖĞ
+        ##å°†æ–‡ä»¶å‡å‹åˆ° ${UNGZIP_DIR_FILE} ç›®å½•æ–‡ä»¶ä¸­
         ungzip ${DOWNLOAD_DIR_FILE} ${UNGZIP_DIR_FILE}
     fi
 }
@@ -60,18 +57,17 @@ checkAndUngzip() {
 download() {
 	
 	getHttpStatus $RESPONSE_LOG
-	##Ö»Òª²»ÊÇ304²ÅÈ¥¶ÁÈ¡ĞÂµÄlastModified,·ñÔòlastModifiedÓÀÔ¶²»»á±»ĞŞ¸Äµô
+	##åªè¦ä¸æ˜¯304æ‰å»è¯»å–æ–°çš„lastModified,å¦åˆ™lastModifiedæ°¸è¿œä¸ä¼šè¢«ä¿®æ”¹æ‰
 	if [ $httpStatus -ne 304 ]; then
 		getLastModified $RESPONSE_LOG	
 	fi
     
-	##Èç¹ûÓĞlastModifiedĞÅÏ¢£¬ÔòÌí¼ÓÍ·ĞÅÏ¢È¥ÇëÇó
-	param=""
-    if [ -n "$lastModified" ]; then
-    	param="--header=If-Modified-Since:${lastModified}"
+	##ä¸‹è½½ç‰ˆæœ¬æ–‡ä»¶ï¼Œå¦‚æœæœ‰lastModifiedä¿¡æ¯ï¼Œåˆ™æ·»åŠ å¤´ä¿¡æ¯å»è¯·æ±‚
+	if [ -n "$lastModified" ]; then
+    	wget -S -t 0 -T 5 "--header=If-Modified-Since:${lastModified}" ${STYLE_VERSION_URL} -O ${DOWNLOAD_DIR_FILE_TMP} > $RESPONSE_LOG 2>&1
+    else
+    	wget -S -t 0 -T 5 ${STYLE_VERSION_URL} -O ${DOWNLOAD_DIR_FILE_TMP} > $RESPONSE_LOG 2>&1    
     fi
-    ##ÏÂÔØ°æ±¾ÎÄ¼ş
-    wget -S -t 0 -T 5 "$param" ${STYLE_VERSION_URL} -O ${DOWNLOAD_DIR_FILE_TMP} > $RESPONSE_LOG 2>&1
     checkAndUngzip
 }
 
@@ -83,12 +79,7 @@ main() {
     if [ -f "$RESPONSE_LOG" ]; then
     	rm $RESPONSE_LOG
     fi
-    
-    while [ true ]; do
-        ##ÏÂÔØµ÷ÓÃ
-        download
-        sleep $interval
-    done
 }
 
 main
+
