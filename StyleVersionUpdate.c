@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 
 #define WGET_CMD "wget -S -t 1 -T 5 "
 #define BUFFER_PIECE_SIZE 128
@@ -163,7 +164,7 @@ char *readResponse(char *responsePath) {
 	char *responseBuf = NULL;
 	struct stat st;
 	if (stat(responsePath, &st) != -1) {
-		responseBuf = malloc(st.st_size);
+		responseBuf = malloc(sizeof(char) * st.st_size);
 	}
 	if(NULL == responseBuf) {
 		return NULL;
