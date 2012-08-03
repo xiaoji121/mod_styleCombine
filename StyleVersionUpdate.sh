@@ -1,8 +1,8 @@
 #!/bin/bash
 
 gzip=`which gzip`
-STYLE_DOMAIN="$0"
-DOWNLOAD_DIR="$1"
+STYLE_DOMAIN="$1"
+DOWNLOAD_DIR="$2"
 STYLE_VERSION_URI="styleVersion" 
 
 lastModified=""
