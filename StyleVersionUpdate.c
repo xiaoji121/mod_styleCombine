@@ -136,13 +136,16 @@ int getHttpStatus(char *response) {
 }
 
 void getLastModified(char *response, buffer **modifiedBuf) {
+
+	//释放上一次赋于他的内存空间，再接受新的赋值。不然这儿会有内存泄露
+	buffer_free(*modifiedBuf);
+	*modifiedBuf = NULL;
+
 	if(NULL == response) {
 		return;
 	}
 	char *lastModified = strstr(response, LAST_MODIFIED_NAME);
 	if(NULL == lastModified) {
-		buffer_free(*modifiedBuf);
-		*modifiedBuf = NULL;
 		return;
 	}
 	lastModified += LAST_MODIFIED_NAME_LEN;
@@ -153,7 +156,6 @@ void getLastModified(char *response, buffer **modifiedBuf) {
 		buf->used++;
 	}
 	buf->ptr[buf->used] = ZERO_END;
-	buffer_free(*modifiedBuf);
 	*modifiedBuf = buf;
 }
 
