@@ -20,12 +20,15 @@
 #define TMP "_tmp"
 #define LAST_MODIFIED_NAME "Last-Modified: "
 #define HEADER "\"--header=If-Modified-Since:"
+#define GZIP_CMD "/bin/gzip -cd "
 #define USAGE "--($1=http://xxxx/styleVersion.gz)---($2=/home/admin/output/styleVersion.gz)----($3=5)"
 int WGET_CMD_LEN = 0;
 int REPONSE_LOG_LEN = 0;
 int TMP_LEN = 0;
 int LAST_MODIFIED_NAME_LEN = 0;
 int HEADER_LEN = 0;
+int GZIP_CMD_LEN = 0;
+int LAST_MODIFIED_LEN = 40;
 
 const char ZERO_END = '\0';
 int debug = 1;
@@ -94,6 +97,7 @@ void initGlobalVar(){
 	TMP_LEN = strlen(TMP);
 	LAST_MODIFIED_NAME_LEN = strlen(LAST_MODIFIED_NAME);
 	HEADER_LEN = strlen(HEADER);
+	GZIP_CMD_LEN = strlen(GZIP_CMD);
 	debug = 0;
 }
 
@@ -113,10 +117,11 @@ static void stringAppend(buffer *buf, char *str, int strLen) {
 	if(buf->used + strLen >= buf->size) {
 		buf->size += (strLen + BUFFER_PIECE_SIZE);
 		buf->ptr = realloc(buf->ptr, buf->size);
+		printf("realloc===============");
 	}
 	memcpy(buf->ptr + buf->used, str, strLen);
 	buf->used += strLen;
-	buf->ptr[buf->used + 1] = ZERO_END;
+	buf->ptr[buf->used] = ZERO_END;
 	return;
 }
 
@@ -150,7 +155,7 @@ void getLastModified(char *response, buffer **modifiedBuf) {
 	}
 	lastModified += LAST_MODIFIED_NAME_LEN;
 
-	buffer *buf = buffer_init_size(100);
+	buffer *buf = buffer_init_size(LAST_MODIFIED_LEN);
 	for(; (*lastModified !='\n' && buf->used < buf->size); ++lastModified) {
 		buf->ptr[buf->used] = *lastModified;
 		buf->used++;
@@ -187,9 +192,8 @@ void checkAndGzip(buffer *tmpFilePath, buffer *targetFilePath, buffer *expectFil
 	if(200 == httpStatus) {
 		if(-1 != rename(tmpFilePath->ptr, targetFilePath->ptr)) {
 			//system invoke unzip
-			char *cmd = "/bin/gzip -cd ";
-			buffer *unzipCmd = buffer_init_size(100);
-			stringAppend(unzipCmd, cmd, strlen(cmd));
+			buffer *unzipCmd = buffer_init_size(20 + targetFilePath->used + expectFilePath->used);
+			stringAppend(unzipCmd, GZIP_CMD, GZIP_CMD_LEN);
 			stringAppend(unzipCmd, targetFilePath->ptr, targetFilePath->used);
 			stringAppend(unzipCmd, " > ", 3);
 			stringAppend(unzipCmd, expectFilePath->ptr, expectFilePath->used);
@@ -213,15 +217,19 @@ void intervalWork(VersionUpdateConfig *config) {
 
 	buffer *lastModifiedTime = NULL;
 
+	int paramLen = config->URLDomain->used + config->tmpVersionFilePath->used + config->reponseFilePath->used;
+	buffer *param = buffer_init_size(20 + paramLen);
+	stringAppend(param, " ", 1);
+	stringAppend(param, config->URLDomain->ptr, config->URLDomain->used);
+	stringAppend(param, " -O ", 4);
+	stringAppend(param, config->tmpVersionFilePath->ptr, config->tmpVersionFilePath->used);
+	stringAppend(param, " > ", 3);
+	stringAppend(param, config->reponseFilePath->ptr, config->reponseFilePath->used);
+	stringAppend(param, " 2>&1 ", 6);
+
 	while(1) {
-		//thread interval exec
-		buffer *cmdBuf = buffer_init_size(500);
-		stringAppend(cmdBuf, WGET_CMD, WGET_CMD_LEN);
-
 		char *responseCnt = readResponse(config->reponseFilePath->ptr);
-
 		int httpStatus = getHttpStatus(responseCnt);
-
 		if(debug) {
 			fprintf(stdout, "httpStatus:%d\n", httpStatus);
 		}
@@ -230,19 +238,15 @@ void intervalWork(VersionUpdateConfig *config) {
 			getLastModified(responseCnt, &lastModifiedTime);
 		}
 		debug_buffer(lastModifiedTime, "lastModifiedTime");
+		//thread interval exec
+		buffer *cmdBuf = buffer_init_size(LAST_MODIFIED_LEN + WGET_CMD_LEN + HEADER_LEN + param->used);
+		stringAppend(cmdBuf, WGET_CMD, WGET_CMD_LEN);
 		if(NULL != lastModifiedTime) {
 			stringAppend(cmdBuf, HEADER, HEADER_LEN);
 			stringAppend(cmdBuf, lastModifiedTime->ptr, lastModifiedTime->used);
 			stringAppend(cmdBuf, "\"", 1);
 		}
-		stringAppend(cmdBuf, " ", 1);
-		stringAppend(cmdBuf, config->URLDomain->ptr, config->URLDomain->used);
-		stringAppend(cmdBuf, " -O ", 4);
-		stringAppend(cmdBuf, config->tmpVersionFilePath->ptr, config->tmpVersionFilePath->used);
-		stringAppend(cmdBuf, " > ", 3);
-		stringAppend(cmdBuf, config->reponseFilePath->ptr, config->reponseFilePath->used);
-		stringAppend(cmdBuf, " 2>&1 ", 6);
-
+		stringAppend(cmdBuf, param->ptr, param->used);
 		debug_buffer(cmdBuf, "cmdBuf");
 
 		if(-1 == system(cmdBuf->ptr)) {
@@ -253,7 +257,7 @@ void intervalWork(VersionUpdateConfig *config) {
 		buffer_free(cmdBuf);
 
 		checkAndGzip(config->tmpVersionFilePath, config->versionFilePath,
-				config->expectVersionFilePath, config->reponseFilePath);
+					config->expectVersionFilePath, config->reponseFilePath);
 
 		sleep(config->intervalSecond);
 	}
@@ -287,28 +291,28 @@ void parseArgs(VersionUpdateConfig *config, int argc, char *args[]) {
 	//interval time
 	config->intervalSecond = intervalSecond;
 	//url
-	buffer *URLDomain = buffer_init_size(URLLen);
+	buffer *URLDomain = buffer_init_size(URLLen + 1);
 	stringAppend(URLDomain, URL, URLLen);
 	config->URLDomain = URLDomain;
 	debug_buffer(URLDomain, "URLDomain");
 	//source
-	buffer *versionFilePath = buffer_init_size(pathLen);
+	buffer *versionFilePath = buffer_init_size(pathLen + 1);
 	stringAppend(versionFilePath, path, pathLen);
 	config->versionFilePath = versionFilePath;
 	debug_buffer(versionFilePath, "versionFilePath");
 	//expect
-	buffer *expectVersionFilePath = buffer_init_size(100);
+	buffer *expectVersionFilePath = buffer_init_size(versionFilePath->size);
 	stringAppend(expectVersionFilePath, path, pathLen - 3); //--clean .gz
 	config->expectVersionFilePath = expectVersionFilePath;
 	debug_buffer(expectVersionFilePath, "expectVersionFilePath");
 	//response
-	buffer *reponseFilePath = buffer_init_size(expectVersionFilePath->size);
+	buffer *reponseFilePath = buffer_init_size(versionFilePath->size + REPONSE_LOG_LEN);
 	stringAppend(reponseFilePath, expectVersionFilePath->ptr, expectVersionFilePath->used);
 	stringAppend(reponseFilePath, REPONSE_LOG, REPONSE_LOG_LEN);
 	config->reponseFilePath = reponseFilePath;
 	debug_buffer(reponseFilePath, "reponseFilePath");
 	//tmp
-	buffer *tmpVersionFilePath = buffer_init_size(versionFilePath->size);
+	buffer *tmpVersionFilePath = buffer_init_size(versionFilePath->size + TMP_LEN);
 	stringAppend(tmpVersionFilePath, versionFilePath->ptr, versionFilePath->used);
 	stringAppend(tmpVersionFilePath, TMP, TMP_LEN);
 	config->tmpVersionFilePath = tmpVersionFilePath;
