@@ -220,7 +220,7 @@ static void stringAppend(buffer *buf, char *str, int strLen) {
 	}
 	memcpy(buf->ptr + buf->used, str, strLen);
 	buf->used += strLen;
-	buf->ptr[buf->used + 1] = ZERO_END;
+	buf->ptr[buf->used] = ZERO_END;
 	return;
 }
 
