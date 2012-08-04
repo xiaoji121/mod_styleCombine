@@ -215,7 +215,7 @@ void intervalWork(VersionUpdateConfig *config) {
 
 	while(1) {
 		//thread interval exec
-		buffer *cmdBuf = buffer_init_size(10240);
+		buffer *cmdBuf = buffer_init_size(500);
 		stringAppend(cmdBuf, WGET_CMD, WGET_CMD_LEN);
 
 		char *responseCnt = readResponse(config->reponseFilePath->ptr);
