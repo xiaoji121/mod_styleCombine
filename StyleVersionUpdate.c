@@ -21,7 +21,7 @@
 #define LAST_MODIFIED_NAME "Last-Modified: "
 #define HEADER "\"--header=If-Modified-Since:"
 #define GZIP_CMD "/bin/gzip -cd "
-#define USAGE "PARA ERROR SEE:--\n($1=http://xxxx/styleVersion.gz)\n($2=/home/admin/output/styleVersion.gz)\n($3=180)"
+#define USAGE "v1.0.0 PARA ERROR SEE:--\n($1=http://xxxx/styleVersion.gz)\n($2=/home/admin/output/styleVersion.gz)\n($3=180)"
 int WGET_CMD_LEN = 0;
 int REPONSE_LOG_LEN = 0;
 int TMP_LEN = 0;
