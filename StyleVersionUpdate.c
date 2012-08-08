@@ -327,6 +327,7 @@ void parseArgs(VersionUpdateConfig *config, int argc, char *args[]) {
 	if (-1 == stat(versionFileDir->ptr, &st)) {
 		//mkdir
 		mkdir_recursive(versionFileDir->ptr);
+		debug_buffer(versionFileDir, "mkdir_recursive make done....");
 	}
 	debug_buffer(versionFileDir, "versionFileDir");
 	//source
