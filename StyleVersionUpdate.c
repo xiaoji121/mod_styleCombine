@@ -21,7 +21,7 @@
 #define LAST_MODIFIED_NAME "Last-Modified: "
 #define HEADER "\"--header=If-Modified-Since:"
 #define GZIP_CMD "/bin/gzip -cd "
-#define USAGE "--($1=http://xxxx/styleVersion.gz)---($2=/home/admin/output/styleVersion.gz)----($3=5)"
+#define USAGE "PARA ERROR SEE:--\n($1=http://xxxx/styleVersion.gz)\n($2=/home/admin/output/styleVersion.gz)\n($3=180)"
 int WGET_CMD_LEN = 0;
 int REPONSE_LOG_LEN = 0;
 int TMP_LEN = 0;
@@ -58,7 +58,7 @@ buffer *buffer_init() {
 	buf->size = 0;
 	return buf;
 }
-buffer *buffer_init_size(int size) {
+buffer *buffer_init_size(size_t size) {
 	buffer *buf = buffer_init();
 	if(NULL == buf) {
 		return buf;
@@ -85,6 +85,7 @@ void debug_buffer(buffer *buf, char *name) {
 typedef struct {
 	int     intervalSecond;
 	buffer *URLDomain;
+	buffer *versionFileDir;
 	buffer *versionFilePath;
 	buffer *expectVersionFilePath;
 	buffer *reponseFilePath;
@@ -101,7 +102,7 @@ void initGlobalVar(){
 	debug = 0;
 }
 
-static void stringAppend(buffer *buf, char *str, int strLen) {
+static void stringAppend(buffer *buf, char *str, size_t strLen) {
 	if(NULL == buf || NULL == str || strLen <= 0) {
 		return;
 	}
@@ -117,12 +118,28 @@ static void stringAppend(buffer *buf, char *str, int strLen) {
 	if(buf->used + strLen >= buf->size) {
 		buf->size += (strLen + BUFFER_PIECE_SIZE);
 		buf->ptr = realloc(buf->ptr, buf->size);
-		printf("realloc===============");
 	}
 	memcpy(buf->ptr + buf->used, str, strLen);
 	buf->used += strLen;
 	buf->ptr[buf->used] = ZERO_END;
 	return;
+}
+
+static int mkdir_recursive(char *dir) {
+	char *p = dir;
+	if (!dir || !dir[0])
+		return 0;
+
+	while ((p = strchr(p + 1, '/')) != NULL) {
+		*p = '\0';
+		if ((mkdir(dir, 0700) != 0) && (errno != EEXIST)) {
+			*p = '/';
+			return -1;
+		}
+		*p++ = '/';
+		if (!*p) return 0; /* Ignore trailing slash */
+	}
+	return (mkdir(dir, 0700) != 0) && (errno != EEXIST) ? -1 : 0;
 }
 
 int getHttpStatus(char *response) {
@@ -201,6 +218,7 @@ void checkAndGzip(buffer *tmpFilePath, buffer *targetFilePath, buffer *expectFil
 			debug_buffer(unzipCmd, "unzipCmd");
 			if(-1 == system(unzipCmd->ptr)) {
 				fprintf(stderr, "system(gzip....) error:%s\n", unzipCmd->ptr);
+				exit(5);
 			}
 			buffer_free(unzipCmd);
 		}
@@ -251,6 +269,7 @@ void intervalWork(VersionUpdateConfig *config) {
 
 		if(-1 == system(cmdBuf->ptr)) {
 			fprintf(stderr, "system (wget...) error:%s\n", cmdBuf->ptr);
+			exit(4);
 		}
 
 		free(responseCnt);
@@ -267,7 +286,7 @@ void parseArgs(VersionUpdateConfig *config, int argc, char *args[]) {
 
 	if(argc < 3) {
 		fprintf(stderr, "USAGE:%s\n", USAGE);
-		return;
+		exit(3);
 	}
 
 	if(debug) {
@@ -285,8 +304,8 @@ void parseArgs(VersionUpdateConfig *config, int argc, char *args[]) {
 		debug = atoi(args[4]);
 	}
 	//global var
-	int URLLen = strlen(URL);
-	int pathLen = strlen(path);
+	size_t URLLen = strlen(URL);
+	size_t pathLen = strlen(path);
 
 	//interval time
 	config->intervalSecond = intervalSecond;
@@ -295,6 +314,21 @@ void parseArgs(VersionUpdateConfig *config, int argc, char *args[]) {
 	stringAppend(URLDomain, URL, URLLen);
 	config->URLDomain = URLDomain;
 	debug_buffer(URLDomain, "URLDomain");
+	//dir
+	buffer *versionFileDir = buffer_init_size(pathLen + 1);
+	char *lastChar = strrchr(path, '/');
+	if(NULL == lastChar) {
+		fprintf(stderr, "USAGE:%s\n", USAGE);
+		exit(5);
+	}
+	stringAppend(versionFileDir, path, pathLen - strlen(lastChar));
+	config->versionFileDir = versionFileDir;
+	struct stat st;
+	if (-1 == stat(versionFileDir->ptr, &st)) {
+		//mkdir
+		mkdir_recursive(versionFileDir->ptr);
+	}
+	debug_buffer(versionFileDir, "versionFileDir");
 	//source
 	buffer *versionFilePath = buffer_init_size(pathLen + 1);
 	stringAppend(versionFilePath, path, pathLen);
