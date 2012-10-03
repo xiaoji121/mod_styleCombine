@@ -45,6 +45,8 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 
 #define DEFAULT_CONTENT_LEN (1024 << 8) //262144
 #define DOMAIN_COUNTS 2
+/** Default alignment */
+#define APR_ALIGN_DEFAULT(size) APR_ALIGN(size, 8)
 
 int JS_TAG_PREFIX_LEN = 0, JS_TAG_SUFFIX_LEN = 0;
 int JS_TAG_EXT_PREFIX_LEN = 0, JS_TAG_EXT_SUFFIX_LEN = 0;
@@ -55,7 +57,7 @@ int DEBUG_MODE_LEN = 12;
 const char ZERO_END = '\0';
 /*position char */
 enum PositionEnum{TOP, HEAD, FOOTER, NONE};
-
+const char matches[] = {"</body>"};
 int styleTableSize = 40000;
 
 apr_pool_t   *globalPool = NULL;
@@ -172,17 +174,6 @@ StyleField *style_field_create() {
 	return styleField;
 }
 
-buffer *buffer_init() {
-	buffer *buf = malloc(sizeof(buffer));
-	if(NULL == buf) {
-		return buf;
-	}
-	buf->ptr = NULL;
-	buf->used = 0;
-	buf->size = 0;
-	return buf;
-}
-
 void buffer_free(buffer *b) {
 	if(NULL == b) {
 		return;
@@ -203,12 +194,20 @@ void style_field_free(StyleField *styleField) {
 	return;
 }
 
-buffer *buffer_init_size(int size) {
-	buffer *buf = buffer_init();
+buffer *buffer_init_size(int in_size) {
+	buffer *buf = malloc(sizeof(buffer));
 	if(NULL == buf) {
 		return buf;
 	}
-	buf->ptr = malloc(size);
+	buf->ptr = NULL;
+	buf->used = 0;
+	buf->size = 0;
+	int size = APR_ALIGN_DEFAULT(in_size);
+	if(size < in_size) {
+		buffer_free(buf);
+		return NULL;
+	}
+	buf->ptr = (char *) malloc(size);
 	if(NULL == buf->ptr) {
 		buffer_free(buf);
 		return NULL;
@@ -521,18 +520,20 @@ static StyleField *tagParser(CombineConfig *pConfig, ParserTag *ptag, char *maxT
 	styleField->styleType = ptag->styleType;
 	styleField->position = position;
 	styleField->styleUri = styleUri;
-	char chBuf[1];
+	if(NONE == position && NULL == group) {
+		return styleField;
+	}
+	char g;
 	if(NONE != position && NULL == group) {
 		//create default group
-		group = buffer_init_size(20);
+		group = buffer_init_size(24);
 		stringAppend(group, "_def_group_name_", 16);
-		snprintf(chBuf, 1, "%d", position);
-		group->ptr[group->used++] = chBuf[0];
-		group->ptr[group->used] = ZERO_END;
+		g = '0' + (int) position;
 	} else {
-		snprintf(chBuf, 1, "%d", styleField->async);
-		stringAppend(group, chBuf, 1);
+		g = '0' + styleField->async;
 	}
+	group->ptr[group->used++] = g;
+	group->ptr[group->used] = ZERO_END;
 	styleField->group = group;
 	return styleField;
 }
@@ -748,16 +749,14 @@ static int isRepeat(request_rec *r, apr_hash_t *duplicats, StyleField *styleFiel
 	if(NULL == duplicats) {
 		return 0;
 	}
-	//add domain area
-	char domainIndex[1];
-	snprintf(domainIndex, 1, "%d", styleField->domainIndex);
 	//make a key
 	char *key = apr_palloc(r->pool, styleField->styleUri->used + 2);
 	if(NULL == key) {
 		return 0;
 	}
 	off_t keylen = 0;
-	key[keylen++] = domainIndex[0];
+	//add domain area
+	key[keylen++] = '0' + styleField->domainIndex;
 	memcpy((key + keylen), styleField->styleUri->ptr, styleField->styleUri->used);
 	key[keylen += styleField->styleUri->used] = ZERO_END;
 	if(NULL != apr_hash_get(duplicats, key, keylen)) {
@@ -810,13 +809,33 @@ static void stringSplit(apr_pool_t *pool, int arrayLen, buffer *arrays[], char *
 	}
 }
 
+/**
+ *反向查找字符串所在下标，并返回下标索引
+ */
+static int rStrSearch(const char *str, unsigned int slen, const char matches[], unsigned int mlen) {
+	int i = 0, mindex = --mlen;
+	for(i = --slen; i >= 0; i--) {
+		if(mindex < 0) {
+			return ++i;
+		}
+		if(str[i] == matches[mindex]) {
+			mindex --;
+			continue;
+		}
+		if(mindex < mlen) {
+			mindex = mlen;
+			++i;
+		}
+	}
+	return -1;
+}
+
 static void resetHtml(conn_rec *c, apr_bucket_brigade *pbbkOut,
 						buffer *combinedStyleBuf[], buffer *buf) {
 	if(NULL== buf || NULL == buf->ptr) {
 		return;
 	}
 	char *sourceHtml = buf->ptr;
-
 	int index = 0;
 	char *headIndex = strstr(sourceHtml, "</head>");
 	if(NULL != headIndex) {
@@ -825,9 +844,14 @@ static void resetHtml(conn_rec *c, apr_bucket_brigade *pbbkOut,
 	addBucket(c, pbbkOut, combinedStyleBuf[TOP]->ptr, combinedStyleBuf[TOP]->used);
 	addBucket(c, pbbkOut, combinedStyleBuf[HEAD]->ptr, combinedStyleBuf[HEAD]->used);
 
-	char *endHtmlIndex = buf->ptr + buf->used;
+	char *endHtmlIndex = (buf->ptr + buf->used);
 	char *middleIndex = (sourceHtml + index);
-	char *footerIndex = strstr(middleIndex, "</body>");
+	//因为</body>在整个dom的后部分，从后往前找更近一些
+	int r = rStrSearch(middleIndex, buf->used - index, matches, 7);
+	char *footerIndex = NULL;
+	if(r != -1) {
+		footerIndex = middleIndex + r;
+	}
 	if(NULL != footerIndex) {
 		addBucket(c, pbbkOut, middleIndex, (footerIndex - middleIndex));
 		addBucket(c, pbbkOut, combinedStyleBuf[FOOTER]->ptr, combinedStyleBuf[FOOTER]->used);
@@ -944,7 +968,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 	char *subHtml = ctx->buf->ptr;
 	while (NULL != (curPoint = strSearch(destBuf, subHtml, &matchedType, &isExpression))) {
 		tmpPoint = curPoint;
-		//stringAppend(destBuf, subHtml, curPoint - subHtml);
+		stringAppend(destBuf, subHtml, curPoint - subHtml);
 		//此时表示当前是js文件，需要使用js的标签来处理
 		ptag = (1 == (int) matchedType ? jsPtag:cssPtag);
 		//1 skip&filter
