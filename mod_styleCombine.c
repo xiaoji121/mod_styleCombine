@@ -125,12 +125,6 @@ typedef struct {
 } LinkedList;
 
 typedef struct {
-	buffer *topBuf;
-	buffer *headBuf;
-	buffer *footerBuf;
-} CombinedStyle;
-
-typedef struct {
 	buffer          *domain;
 	buffer          *styleUri;
 	buffer          *version;
@@ -153,14 +147,6 @@ void fillTagConfigParams(TagConfig *tagConfig, buffer *version,
 	tagConfig->isNewLine = isNewLine;
 	tagConfig->styleType = styleType;
 	tagConfig->needExt = needExt;
-}
-
-static void printf_log(buffer *buf, char *str) {
-	char strBuf[10240];
-	memset(strBuf,0,10240);
-	sprintf(strBuf,str,buf,buf->ptr,buf->size,buf->used);
-	ap_log_error(APLOG_MARK, APLOG_ERR, 0, server, "%s", strBuf);
-	return ;
 }
 
 void linked_list_init(LinkedList *list) {
@@ -260,22 +246,6 @@ void buffer_clean(buffer *buf) {
 	buf->ptr[0]=ZERO_END;
 }
 
-/**
- * get uri extention
- */
-static char *getFileExt(char *uri, int len) {
-	if (NULL == uri) {
-		return NULL;
-	}
-	if (0 == memcmp(EXT_JS, uri + len - 3, 3)) {
-		return EXT_JS;
-	}
-	if (0 == memcmp(EXT_CSS, uri + len - 4, 4)) {
-		return EXT_CSS;
-	}
-	return NULL;
-}
-
 static void stringAppend(buffer *buf, char *str, int strLen) {
 	if(NULL == buf || NULL == str || strLen <= 0) {
 		return;
@@ -292,7 +262,6 @@ static void stringAppend(buffer *buf, char *str, int strLen) {
 	if(buf->used + strLen >= buf->size) {
 		buf->size += (strLen + BUFFER_PIECE_SIZE);
 		buf->ptr = realloc(buf->ptr, buf->size);
-		printf_log(buf, "stringAppend new realloc: buf=%p  ptr=%p size=%ld used=%ld");
 	}
 	memcpy(buf->ptr + buf->used, str, strLen);
 	buf->used += strLen;
@@ -557,11 +526,11 @@ static StyleField *tagParser(CombineConfig *pConfig, ParserTag *ptag, char *maxT
 		//create default group
 		group = buffer_init_size(20);
 		stringAppend(group, "_def_group_name_", 16);
-		sprintf(chBuf, "%d", position);
+		snprintf(chBuf, 1, "%d", position);
 		group->ptr[group->used++] = chBuf[0];
 		group->ptr[group->used] = ZERO_END;
 	} else {
-		sprintf(chBuf, "%d", styleField->async);
+		snprintf(chBuf, 1, "%d", styleField->async);
 		stringAppend(group, chBuf, 1);
 	}
 	styleField->group = group;
@@ -626,7 +595,7 @@ static void cleanExt(StyleField *styleField) {
  * 将js/css列表合并成一个url,并放到相应的位置上去
  */
 static void combineStyles(CombineConfig *pConfig, TagConfig *tagConfig, LinkedList *styleList,
-								CombinedStyle *combinedStyle, buffer *tmpUriBuf, buffer *versionBuf) {
+								buffer *combinedStyleBuf[], buffer *tmpUriBuf, buffer *versionBuf) {
 	if(NULL == styleList) {
 		return;
 	}
@@ -636,17 +605,7 @@ static void combineStyles(CombineConfig *pConfig, TagConfig *tagConfig, LinkedLi
 		return;
 	}
 	register buffer *combinedBuf = NULL;
-	switch(styleField->position) {
-	case TOP: //top
-		combinedBuf = combinedStyle->topBuf;
-		break;
-	case HEAD: //head
-		combinedBuf = combinedStyle->headBuf;
-		break;
-	case FOOTER: //footer
-		combinedBuf = combinedStyle->footerBuf;
-		break;
-	}
+	combinedBuf = combinedStyleBuf[styleField->position];
 	int count = 0;
 	tagConfig->styleType = styleField->styleType;
 	tagConfig->domain  = pConfig->newDomains[styleField->domainIndex];
@@ -682,12 +641,12 @@ static void combineStyles(CombineConfig *pConfig, TagConfig *tagConfig, LinkedLi
 }
 
 //var tt="{"group1":{"css":"http://xx/a1.css","js":"http://xx/a1.js"},"group2":{"js":"http://xx/a2.js"}}"
-static void combineStylesAsync(CombineConfig *pConfig, StyleList *styleList, CombinedStyle *combinedStyle,
+static void combineStylesAsync(CombineConfig *pConfig, StyleList *styleList, buffer *combinedStyleBuf[],
 								buffer *versionBuf) {
-	if(NULL == styleList || NULL == pConfig || NULL == combinedStyle) {
+	if(NULL == styleList || NULL == pConfig || NULL == combinedStyleBuf) {
 		return;
 	}
-	buffer *headBuf = combinedStyle->headBuf;
+	buffer *headBuf = combinedStyleBuf[HEAD];
 	headBuf->ptr[headBuf->used++] = '\'';
 	stringAppend(headBuf, styleList->group->ptr, styleList->group->used - 1);
 	stringAppend(headBuf, "':{'css'", 8);
@@ -743,40 +702,44 @@ static void combineStylesAsync(CombineConfig *pConfig, StyleList *styleList, Com
 /**
  * 用于开发时，打开调试模块调用。将js/css的位置做移动，但不做合并
  */
-static void combineStylesDebug(CombineConfig *pConfig, TagConfig *tagConfig, LinkedList *styleList,
-								CombinedStyle *combinedStyle) {
-	if(NULL == styleList) {
+static void combineStylesDebug(CombineConfig *pConfig, TagConfig *tagConfig, LinkedList *fullStyleList, buffer *combinedStyleBuf[]) {
+	ListNode *styleNode = NULL;
+	if(NULL == fullStyleList || NULL == (styleNode = fullStyleList->first)) {
 		return;
 	}
-	StyleField *styleField = NULL;
-	ListNode *node = styleList->first;
-	if(NULL == node || NULL == (styleField = (StyleField *)node->value)) {
-		return;
-	}
-	tagConfig->styleType = styleField->styleType;
-	tagConfig->domain = pConfig->newDomains[styleField->domainIndex];
-	tagConfig->isNewLine = 1, tagConfig->needExt = 0;
-	while(NULL != node) {
-		ListNode *freeNode = node;
-		styleField = (StyleField *) node->value;
-		tagConfig->version = styleField->version;
-		tagConfig->styleUri = styleField->styleUri;
-		switch (styleField->position) {
-			case TOP: //top
-				addExtStyle(combinedStyle->topBuf, tagConfig);
-				break;
-			case HEAD: //head
-				addExtStyle(combinedStyle->headBuf, tagConfig);
-				break;
-			case FOOTER: //footer
-				addExtStyle(combinedStyle->footerBuf, tagConfig);
-				break;
-			default:
-				break;
+	register buffer *combinedBuf = NULL;
+	register int i = 0;
+	while(NULL != styleNode) {
+		ListNode *freeStyleNode = styleNode;
+		StyleList *styleList = (StyleList *) styleNode->value;
+		for(i = 0; i < 2; i++) {
+			ListNode *node = NULL;
+			LinkedList *list = styleList->list[i];
+			if(NULL == list || NULL == (node = list->first)) {
+				continue;
+			}
+			StyleField *styleField = (StyleField *)node->value;
+			if(NULL == styleField) {
+				continue;
+			}
+			combinedBuf = combinedStyleBuf[styleField->position];
+			tagConfig->styleType = styleField->styleType;
+			tagConfig->domain  = pConfig->newDomains[styleField->domainIndex];
+			fillTagConfigParams(tagConfig, NULL, 1, tagConfig->styleType, 0);
+			while(NULL != node) {
+				ListNode *freeNode = node;
+				styleField = (StyleField *) node->value;
+				tagConfig->version = styleField->version;
+				tagConfig->styleUri = styleField->styleUri;
+				addExtStyle(combinedBuf, tagConfig);
+				node = node->next;
+				style_field_free(styleField);
+				free(freeNode);
+			}
+			free(list);
 		}
-		node = node->next;
-		style_field_free(styleField);
-		free(freeNode);
+		styleNode = (ListNode *) styleNode->next;
+		free(styleList); free(freeStyleNode);
 	}
 	return;
 }
@@ -787,7 +750,7 @@ static int isRepeat(request_rec *r, apr_hash_t *duplicats, StyleField *styleFiel
 	}
 	//add domain area
 	char domainIndex[1];
-	sprintf(domainIndex, "%d", styleField->domainIndex);
+	snprintf(domainIndex, 1, "%d", styleField->domainIndex);
 	//make a key
 	char *key = apr_palloc(r->pool, styleField->styleUri->used + 2);
 	if(NULL == key) {
@@ -797,7 +760,6 @@ static int isRepeat(request_rec *r, apr_hash_t *duplicats, StyleField *styleFiel
 	key[keylen++] = domainIndex[0];
 	memcpy((key + keylen), styleField->styleUri->ptr, styleField->styleUri->used);
 	key[keylen += styleField->styleUri->used] = ZERO_END;
-
 	if(NULL != apr_hash_get(duplicats, key, keylen)) {
 		//if uri has exsit then skiping it
 		return 1;
@@ -849,7 +811,7 @@ static void stringSplit(apr_pool_t *pool, int arrayLen, buffer *arrays[], char *
 }
 
 static void resetHtml(conn_rec *c, apr_bucket_brigade *pbbkOut,
-						CombinedStyle *combinedStyle, buffer *buf) {
+						buffer *combinedStyleBuf[], buffer *buf) {
 	if(NULL== buf || NULL == buf->ptr) {
 		return;
 	}
@@ -860,24 +822,24 @@ static void resetHtml(conn_rec *c, apr_bucket_brigade *pbbkOut,
 	if(NULL != headIndex) {
 		addBucket(c, pbbkOut, sourceHtml, (index = headIndex - sourceHtml));
 	}
-	addBucket(c, pbbkOut, combinedStyle->topBuf->ptr, combinedStyle->topBuf->used);
-	addBucket(c, pbbkOut, combinedStyle->headBuf->ptr, combinedStyle->headBuf->used);
+	addBucket(c, pbbkOut, combinedStyleBuf[TOP]->ptr, combinedStyleBuf[TOP]->used);
+	addBucket(c, pbbkOut, combinedStyleBuf[HEAD]->ptr, combinedStyleBuf[HEAD]->used);
 
 	char *endHtmlIndex = buf->ptr + buf->used;
 	char *middleIndex = (sourceHtml + index);
 	char *footerIndex = strstr(middleIndex, "</body>");
 	if(NULL != footerIndex) {
 		addBucket(c, pbbkOut, middleIndex, (footerIndex - middleIndex));
-		addBucket(c, pbbkOut, combinedStyle->footerBuf->ptr, combinedStyle->footerBuf->used);
+		addBucket(c, pbbkOut, combinedStyleBuf[FOOTER]->ptr, combinedStyleBuf[FOOTER]->used);
 		addBucket(c, pbbkOut, footerIndex, (endHtmlIndex - footerIndex));
 	} else {
 		addBucket(c, pbbkOut, middleIndex, (endHtmlIndex - middleIndex));
-		addBucket(c, pbbkOut, combinedStyle->footerBuf->ptr, combinedStyle->footerBuf->used);
+		addBucket(c, pbbkOut, combinedStyleBuf[FOOTER]->ptr, combinedStyleBuf[FOOTER]->used);
 	}
 	return;
 }
 
-static inline char *strSearch(const char * str1, int **matchedType, int **isExpression) {
+static inline char *strSearch(buffer *dest, const char *str1, int **matchedType, int **isExpression) {
 	register char *cp = (char *) str1;
 	register char *s1 = NULL;
 
@@ -920,7 +882,7 @@ static inline char *strSearch(const char * str1, int **matchedType, int **isExpr
 					if(0 == memcmp("extarea", ++s1, 7)) {
 						cp += 10;//<textarea>
 						while (*cp) {
-							if('<' == *cp && 0 == memcmp("</textarea>", cp, 11)) {
+							if(0 == memcmp("</textarea>", cp, 11)) {
 								cp += 11;
 								break;
 							}
@@ -932,7 +894,7 @@ static inline char *strSearch(const char * str1, int **matchedType, int **isExpr
 					if (0 == memcmp("EXTAREA", ++s1, 7)) {
 						cp += 10; //<textarea>
 						while (*cp) {
-							if('<' == *cp && 0 == memcmp("</TEXTAREA>", cp, 11)) {
+							if(0 == memcmp("</TEXTAREA>", cp, 11)) {
 								cp += 11;
 								break;
 							}
@@ -956,7 +918,7 @@ static inline char *strSearch(const char * str1, int **matchedType, int **isExpr
 	return (NULL);
 }
 
-static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstBuf, CombineConfig *pConfig, CombineCtx *ctx) {
+static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBuf, CombineConfig *pConfig, CombineCtx *ctx) {
 	char *maxTagBuf = malloc(pConfig->maxUrlLen + 100);
 	if(NULL == maxTagBuf) {
 		return 0;
@@ -980,15 +942,14 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 		domains[i] = NULL;
 	}
 	char *subHtml = ctx->buf->ptr;
-	while (NULL != (curPoint = strSearch(subHtml, &matchedType, &isExpression))) {
+	while (NULL != (curPoint = strSearch(destBuf, subHtml, &matchedType, &isExpression))) {
 		tmpPoint = curPoint;
-		stringAppend(dstBuf, subHtml, curPoint - subHtml);
+		//stringAppend(destBuf, subHtml, curPoint - subHtml);
 		//此时表示当前是js文件，需要使用js的标签来处理
 		ptag = (1 == (int) matchedType ? jsPtag:cssPtag);
 		//1 skip&filter
 		//2 getField {getType, getPos, getAsync, getGroup}
-		memcpy(maxTagBuf, ptag->prefix->ptr, ptag->prefix->used);
-		for (i = ptag->prefix->used; (curPoint[i] != ptag->suffix) && i < maxTagSize; i++) {
+		for (i = 0; (curPoint[i] != ptag->suffix) && i < maxTagSize; i++) {
 			maxTagBuf[i] = curPoint[i];
 		}
 		maxTagBuf[i++] = ptag->suffix;
@@ -1005,7 +966,7 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 
 			if (memcmp(ptag->closeTag->ptr, curPoint, ptag->closeTag->used) != 0) {
 				//找不到结束的</script>
-				stringAppend(dstBuf, maxTagBuf, i);
+				stringAppend(destBuf, maxTagBuf, i);
 				subHtml = curPoint;
 				continue;
 			}
@@ -1013,7 +974,7 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 		}
 		StyleField *styleField = tagParser(pConfig, ptag, maxTagBuf, i);
 		if (NULL == styleField) {
-			stringAppend(dstBuf, maxTagBuf, i);
+			stringAppend(destBuf, maxTagBuf, i);
 			subHtml = curPoint;
 			style_field_free(styleField);
 			continue;
@@ -1028,14 +989,14 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 			buffer *nversion = getStrVersion(styleField->styleUri, r, pConfig);
 			styleField->version = nversion;
 			fillTagConfigParams(tagConfig, nversion, 0, ptag->styleType, 0);
-			addExtStyle(dstBuf, tagConfig);
+			addExtStyle(destBuf, tagConfig);
 			subHtml = curPoint;
 			style_field_free(styleField);
 			continue;
 		}
 		//FIXME:去重部分，对于异步与同步加载的js来说需要特别处理，否则会出错
 		//clean duplicate
-		if(isRepeat(r, duplicates, styleField)) {
+		if(!styleField->async && isRepeat(r, duplicates, styleField)) {
 			subHtml = curPoint;
 			style_field_free(styleField);
 			continue;
@@ -1047,7 +1008,7 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 		fillTagConfigParams(tagConfig, nversion, 0, ptag->styleType, 0);
 		//当没有使用异步并且又没有设置位置则保持原位不动
 		if(0 == styleField->async && NONE == styleField->position) {
-			addExtStyle(dstBuf, tagConfig);
+			addExtStyle(destBuf, tagConfig);
 			subHtml = curPoint;
 			style_field_free(styleField);
 			continue;
@@ -1065,7 +1026,7 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 		} else {
 			LinkedList *list = malloc(sizeof(LinkedList));
 			if(NULL == list) {
-				addExtStyle(dstBuf, tagConfig);
+				addExtStyle(destBuf, tagConfig);
 				subHtml = curPoint;
 				style_field_free(styleField);
 				continue;
@@ -1074,7 +1035,7 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 			if(NULL == styleList) {
 				styleList = malloc(sizeof(StyleList));
 				if(NULL == styleList) {
-					addExtStyle(dstBuf, tagConfig);
+					addExtStyle(destBuf, tagConfig);
 					subHtml = curPoint;
 					style_field_free(styleField);
 					continue;
@@ -1107,7 +1068,43 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 	if(isProcessed) {
 		//append the tail html
 		int subHtmlLen = (ctx->buf->ptr + ctx->buf->used) - subHtml;
-		stringAppend(dstBuf, subHtml, subHtmlLen);
+		stringAppend(destBuf, subHtml, subHtmlLen);
+
+		//async clean duplicates
+		ListNode *node = NULL;
+		if(NULL != asyncGroupList && NULL != (node = asyncGroupList->first)) {
+			while(NULL != node) {
+				StyleList *styleList = (StyleList *) node->value;
+				for(i = 0; i < 2; i++) {
+					LinkedList *list = styleList->list[i];
+					if(NULL == list) {
+						continue;
+					}
+					ListNode *parentNode = NULL, *freeStyleNode = NULL;
+					ListNode *styleNode = (ListNode *) list->first;
+					while(NULL != styleNode) {
+						StyleField *styleField = (StyleField *) styleNode->value;
+						if(isRepeat(r, duplicates, styleField)) {
+							//if exeist delete this node
+							if(NULL == parentNode) {
+								list->first = styleNode->next;
+							} else {
+								parentNode->next = styleNode->next;
+							}
+							freeStyleNode = styleNode;
+							styleNode = styleNode->next;
+							--list->size;
+							style_field_free((StyleField *) freeStyleNode->value);
+							free(freeStyleNode);
+							continue;
+						}
+						parentNode = styleNode;
+						styleNode = styleNode->next;
+					}
+				}
+				node = node->next;
+			}
+		}
 		if(0 == ctx->debugMode) {
 			buffer *versionBuf = buffer_init_size(1000);
 			if(!versionBuf) {
@@ -1115,22 +1112,21 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 				return 0;
 			}
 			//1、先合并需要异步加载的js/css
-			ListNode *node = NULL;
 			if(NULL != asyncGroupList && NULL != (node = asyncGroupList->first)) {
-				stringAppend(combinedStyle->headBuf, "\n<script type=\"text/javascript\">\nvar ", 37);
+				stringAppend(combinedStyleBuf[HEAD], "\n<script type=\"text/javascript\">\nvar ", 37);
 				StyleList *styleList = (StyleList *) node->value;
 				buffer *variableName = pConfig->asyncVariableNames[styleList->domainIndex];
-				stringAppend(combinedStyle->headBuf, variableName->ptr, variableName->used);
-				stringAppend(combinedStyle->headBuf, "=\"{", 3);
+				stringAppend(combinedStyleBuf[HEAD], variableName->ptr, variableName->used);
+				stringAppend(combinedStyleBuf[HEAD], "=\"{", 3);
 				while(NULL != node) {
 					ListNode *freeNode = node;
 					styleList = (StyleList *) node->value;
-					combineStylesAsync(pConfig, styleList, combinedStyle, versionBuf);
+					combineStylesAsync(pConfig, styleList, combinedStyleBuf, versionBuf);
 					node = (ListNode *) node->next;
 					free(freeNode);
 				}
-				--combinedStyle->headBuf->used;
-				stringAppend(combinedStyle->headBuf, "}\";\n</script>\n", 14);
+				--combinedStyleBuf[HEAD]->used;
+				stringAppend(combinedStyleBuf[HEAD], "}\";\n</script>\n", 14);
 			}
 			//2、将外部引入的js/css进行合并
 			if(NULL != syncGroupList && NULL != (node = syncGroupList->first)) {
@@ -1147,10 +1143,9 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 						if(NULL == list) {
 							continue;
 						}
-						//reset buf
 						buffer_clean(tmpUriBuf);
 						buffer_clean(versionBuf);
-						combineStyles(pConfig, tagConfig, list, combinedStyle, tmpUriBuf, versionBuf);
+						combineStyles(pConfig, tagConfig, list, combinedStyleBuf, tmpUriBuf, versionBuf);
 						free(list);
 					}
 					node = (ListNode *) node->next;
@@ -1161,27 +1156,12 @@ static int htmlParser(request_rec *r, CombinedStyle *combinedStyle, buffer *dstB
 			buffer_free(versionBuf);
 		} else if(2 == ctx->debugMode){
 			//debug mode 2
-			ListNode *node = NULL;
-			if(NULL != syncGroupList && NULL != (node = syncGroupList->first)) {
-				while(NULL != node) {
-					ListNode *freeNode = node;
-					StyleList *styleList = (StyleList *) node->value;
-					for(i = 0; i < 2; i++) {
-						LinkedList *list = styleList->list[i];
-						if(NULL == list) {
-							continue;
-						}
-						combineStylesDebug(pConfig, tagConfig, list, combinedStyle);
-						free(list);
-					}
-					node = (ListNode *) node->next;
-					free(styleList); free(freeNode);
-				}
-			}
+			combineStylesDebug(pConfig, tagConfig, syncGroupList, combinedStyleBuf);
+			combineStylesDebug(pConfig, tagConfig, asyncGroupList, combinedStyleBuf);
 		}
 	}
-	if(0 != dstBuf->size) {
-		dstBuf->ptr[dstBuf->used] = ZERO_END;
+	if(0 != destBuf->size) {
+		destBuf->ptr[destBuf->used] = ZERO_END;
 	}
 	if(NULL != duplicates) {
 		apr_hash_clear(duplicates);
@@ -1427,28 +1407,30 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 	}
 	if(ctx->buf->used > 0) {
 		ctx->buf->ptr[ctx->buf->used] = ZERO_END;
-		CombinedStyle combinedStyle;
-		combinedStyle.topBuf = NULL, combinedStyle.headBuf = NULL, combinedStyle.footerBuf = NULL;
 		//load version
 		loadStyleVersion(r, pConfig);
+		int i = 0;
+		buffer *combinedStyleBuf[3] = {NULL, NULL, NULL};
 		buffer *destBuf = buffer_init_size(ctx->buf->used);
 		if(NULL != destBuf) {
-			combinedStyle.topBuf = buffer_init_size(1000);
-			combinedStyle.headBuf = buffer_init_size(1000);
-			combinedStyle.footerBuf = buffer_init_size(1000);
+			for(i = 0; i < 3; i++) {
+				combinedStyleBuf[i] = buffer_init_size(1000);
+			}
 		}
-		if(combinedStyle.footerBuf && combinedStyle.topBuf && combinedStyle.headBuf) {
+		if(combinedStyleBuf[TOP] && combinedStyleBuf[HEAD] && combinedStyleBuf[FOOTER]) {
 			//if find any style
-			if(htmlParser(r, &combinedStyle, destBuf, pConfig, ctx)) {
-				resetHtml(c, ctx->pbbOut, &combinedStyle, destBuf);
+			if(htmlParser(r, combinedStyleBuf, destBuf, pConfig, ctx)) {
+				resetHtml(c, ctx->pbbOut, combinedStyleBuf, destBuf);
 			} else {
 				addBucket(c, ctx->pbbOut, ctx->buf->ptr, ctx->buf->used);
 			}
 		} else {
 			addBucket(c, ctx->pbbOut, ctx->buf->ptr, ctx->buf->used);
 		}
-		buffer_free(combinedStyle.topBuf); buffer_free(combinedStyle.headBuf);
-		buffer_free(combinedStyle.footerBuf); buffer_free(destBuf);
+		for(i = 0; i < 3; i++) {
+			buffer_free(combinedStyleBuf[i]);
+		}
+		buffer_free(destBuf);
 	}
 	//append eos
 	APR_BRIGADE_INSERT_TAIL(ctx->pbbOut, apr_bucket_eos_create(c->bucket_alloc));
