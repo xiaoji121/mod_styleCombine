@@ -22,11 +22,9 @@ public class FileDesc implements Serializable, Comparable<FileDesc> {
 
     private long              lastModified;
 
-    private String            md5Sum;
+    private String            version;
 
     private String            content;
-
-    private long              version;
 
     public FileDesc(){
     }
@@ -62,13 +60,13 @@ public class FileDesc implements Serializable, Comparable<FileDesc> {
     public void setLastModified(long lastModified) {
         this.lastModified = lastModified;
     }
-
-    public String getMd5Sum() {
-        return md5Sum;
+    
+    public String getVersion() {
+        return version;
     }
 
-    public void setMd5Sum(String md5Sum) {
-        this.md5Sum = md5Sum;
+    public void setVersion(String version) {
+        this.version = version;
     }
 
     public String getContent() {
@@ -79,21 +77,13 @@ public class FileDesc implements Serializable, Comparable<FileDesc> {
         this.content = content;
     }
 
-    public long getVersion() {
-        return version;
-    }
-
-    public void setVersion(long version) {
-        this.version = version;
-    }
-
     @Override
     public int hashCode() {
         int prime = 33;
         int result = 1;
         result = prime * result + (path == null ? 0 : path.hashCode());
         result = prime * result + (type == null ? 0 : type.hashCode());
-        result = prime * result + (md5Sum == null ? 0 : md5Sum.hashCode());
+        result = prime * result + (version == null ? 0 : version.hashCode());
         result = prime * result + (int) (size >>> 32);
         result = prime * result + (int) (lastModified >>> 32);
         return result;
@@ -119,7 +109,7 @@ public class FileDesc implements Serializable, Comparable<FileDesc> {
             return false;
         }
 
-        if (!StringUtil.equals(fd.md5Sum, this.md5Sum)) {
+        if (!StringUtil.equals(fd.version, this.version)) {
             return false;
         }
 
@@ -137,15 +127,12 @@ public class FileDesc implements Serializable, Comparable<FileDesc> {
 
     @Override
     public String toString() {
-
         StringBuilder buf = new StringBuilder();
         buf.append("path:").append(path).append("\n");
         buf.append("type:").append(type).append("\n");
         buf.append("size:").append(size).append("\n");
         buf.append("lastModified:").append(lastModified).append("\n");
-        buf.append("md5Sum:").append(md5Sum).append("\n");
         buf.append("version:").append(version).append("\n");
-
         return buf.toString();
     }
 }
