@@ -27,7 +27,6 @@
 #define JS_OUT     "js"
 #define CSS_OUT     "css"
 #define DEFAULT_BUF_SIZE 128
-#define MAX_URI_SIZE (DEFAULT_BUF_SIZE * 1024) // 128K
 #define LDLOG_MARK	__FILE__,__LINE__
 #define URI_SEPARATOR "|"
 #define IOBUF_SIZE 10240
@@ -36,51 +35,49 @@ const char ZERO_END = '\0';
 __mode_t   myMasks = 0700;
 
 typedef struct {
-
 	buffer *combineFileDir;
-
 } plugin_config;
 
 typedef struct {
 	PLUGIN_DATA;
-
 	plugin_config **config_storage;
-
 	plugin_config conf;
-
 } plugin_data;
 
 /**
  * 文件信息
  */
 typedef struct {
-	buffer *filePath;
-	struct fileObject *nextItem;
-
-} fileObject;
+	buffer            *filePath;
+	struct FileObject *nextItem;
+} FileObject;
 
 /**
  * 文件信息包装
  */
 typedef struct {
-	fileObject *fObject;
+	FileObject *fileObject;
 	time_t      lastModified;
 	buffer     *contentType;
 	off_t       totalSize;
 	buffer     *fileExt;
-} fileObjectWrapper;
+} FileObjectWrapper;
 
 /**
  * 获取uri中是所需要的文件后缀，只支持.js/.css 其它文件后缀无法获取，返回NULL
  */
-static char *getFileExt(char *uri, int len) {
+static char *getFileExt(char *uri) {
 	if (NULL == uri) {
 		return NULL;
 	}
-	if (0 == memcmp(EXT_JS, uri + len - 3, 3)) {
+	char *extPosition = strrchr(uri, '.');
+	if(NULL == extPosition) {
+		return NULL;
+	}
+	if (0 == memcmp(extPosition, EXT_JS, 3)) {
 		return EXT_JS;
 	}
-	if (0 == memcmp(EXT_CSS, uri + len - 4, 4)) {
+	if (0 == memcmp(extPosition, EXT_CSS, 4)) {
 		return EXT_CSS;
 	}
 	return NULL;
@@ -103,34 +100,10 @@ static int mkdir_recursive(char *dir) {
 	return (mkdir(dir, myMasks) != 0) && (errno != EEXIST) ? -1 : 0;
 }
 
-static int requestValid(connection *con) {
-	// only accept get && head
-	if (con->request.http_method != HTTP_METHOD_GET
-			&& con->request.http_method != HTTP_METHOD_HEAD) {
-		return 0;
-	}
-	//如果没有uri 或 域名后面加/ 都不需要处理
-	if ((con->uri.path->used) == 0
-			|| con->uri.path->ptr[con->uri.path->used - 2] == '/') {
-		return 0;
-	}
-	if(NULL == getFileExt(con->uri.path->ptr, con->uri.path->used - 1)) {
-		return 0;
-	}
-	if(NULL == strstr(con->uri.path->ptr, URI_SEPARATOR)) {
-		return 0;
-	}
-	// uri_len over max_uri_size 128K
-	if(con->uri.path->used > MAX_URI_SIZE) {
-		return 0;
-	}
-	return 1;
-}
-
 /**
  * 根据uri的md5值+内容大小+最后修改时间生成一个合并后的文件名
  */
-static buffer *createFilePath(server *srv, connection *con, fileObjectWrapper *fObjectWrapper) {
+static buffer *createFilePath(server *srv, connection *con, FileObjectWrapper *fObjectWrapper) {
 
 	UNUSED(srv);
 
@@ -163,7 +136,7 @@ static buffer *createFilePath(server *srv, connection *con, fileObjectWrapper *f
 	return filePath;
 }
 
-static int fileCombining(server *srv, connection *con, fileObjectWrapper *fObjectWrapper, buffer *targetFile) {
+static int fileCombining(server *srv, connection *con, FileObjectWrapper *fObjectWrapper, buffer *targetFile) {
 
 	if (NULL == fObjectWrapper|| NULL == targetFile || 0 == targetFile->used) {
 		return -1;
@@ -174,7 +147,7 @@ static int fileCombining(server *srv, connection *con, fileObjectWrapper *fObjec
 
 	int ifd, ofd, num;
 	char buf[IOBUF_SIZE];
-	fileObject *fObject = fObjectWrapper->fObject;
+	FileObject *fObject = fObjectWrapper->fileObject;
 
 	if(-1 == (ofd = open(targetFileTmp->ptr, O_WRONLY|O_CREAT|O_EXCL, 0600))) {
 		buffer_free(targetFileTmp);
@@ -187,8 +160,7 @@ static int fileCombining(server *srv, connection *con, fileObjectWrapper *fObjec
 		}
 		return -1;
 	}
-
-	for(; NULL != fObject; fObject = fObject->nextItem) {
+	for(; NULL != fObject; fObject = (FileObject *) fObject->nextItem) {
 		if (-1 == (ifd = open(fObject->filePath->ptr, O_RDONLY, 0600))){
 			if (con->conf.log_file_not_found) {
 				log_error_write(srv, LDLOG_MARK, "sbss", "open inFilePath error",
@@ -229,31 +201,27 @@ static int fileCombining(server *srv, connection *con, fileObjectWrapper *fObjec
 	return 1;
 }
 
-static void uriSplit(server *srv, connection *con, fileObjectWrapper *fObjectWrapper, buffer *docRoot) {
-
-	fileObject *firstItem = NULL;
-	fileObject *prevItem = NULL;
+static void uriSplit(server *srv, connection *con, FileObjectWrapper *fObjectWrapper, buffer *docRoot) {
+	FileObject *firstItem = NULL;
+	FileObject *prevItem = NULL;
 	stat_cache_entry *sce = NULL;
 	time_t lastModified = 0;
-
-	char *sourceUri = strndup(con->uri.path->ptr, con->uri.path->used - 1);
-	char *value = NULL, *tmpUri = sourceUri;
+	buffer *sourceUriBuf = buffer_init();
+	buffer_append_string_buffer(sourceUriBuf, con->uri.path);
+	char *value = NULL, *tmpUri = sourceUriBuf->ptr;
 
 	while(NULL != (value = strsep(&tmpUri, URI_SEPARATOR))) {
 		// /home/admin/www_cn/htdocs
 		buffer *absFilePath = buffer_init_buffer(docRoot);
 		// /js/a.js
-		int len = strlen(value);
-		buffer_append_string_len(absFilePath, value, len);
+		buffer_append_string(absFilePath, value);
 		// check and append ext ".js | .css"
-		if(NULL == getFileExt(value, len)) {
+		if(NULL == getFileExt(value)) {
 			buffer_append_string_buffer(absFilePath, fObjectWrapper->fileExt);
 		}
-
 		if (con->conf.log_request_handling) {
 			log_error_write(srv, LDLOG_MARK,  "sb",  "-- absFilePath is:", absFilePath);
 		}
-
 		if(HANDLER_ERROR == stat_cache_get_entry(srv, con, absFilePath, &sce)) {
 			if (con->conf.log_file_not_found) {
 				log_error_write(srv, LDLOG_MARK,  "sb",  "-- not fond subDocRoot", absFilePath);
@@ -261,8 +229,7 @@ static void uriSplit(server *srv, connection *con, fileObjectWrapper *fObjectWra
 			buffer_free(absFilePath);
 			continue;
 		}
-
-		fileObject *fObjectItem = malloc(sizeof(fileObject));
+		FileObject *fObjectItem = (FileObject *) malloc(sizeof(FileObject));
 		fObjectItem->nextItem = NULL;
 		fObjectItem->filePath = absFilePath;
 		if(NULL == firstItem) {
@@ -280,14 +247,13 @@ static void uriSplit(server *srv, connection *con, fileObjectWrapper *fObjectWra
 	if(0 == lastModified) {
 		time(&lastModified);
 	}
-	fObjectWrapper->fObject = firstItem;
+	fObjectWrapper->fileObject = firstItem;
 	fObjectWrapper->lastModified = lastModified;
-
-	free(sourceUri);
+	buffer_free(sourceUriBuf);
 }
 
 int http_response_cachable(server *srv, connection *con, buffer *mtime) {
-	char *swapMoneMatch = con->request.http_if_none_match;
+	const char *swapMoneMatch = con->request.http_if_none_match;
 	con->request.http_if_none_match = NULL;
 	int handlerStatus = http_response_handle_cachable(srv, con, mtime);
 	if (HANDLER_FINISHED == handlerStatus) {
@@ -326,8 +292,31 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 	if (con->conf.log_request_handling) {
 		log_error_write(srv, LDLOG_MARK,  "s",  "-- handling mod_styleUriSplit_physical start");
 	}
-
-	if(0 == requestValid(con)) {
+	// request checker
+	if (con->request.http_method != HTTP_METHOD_GET
+			&& con->request.http_method != HTTP_METHOD_HEAD) {
+		return HANDLER_GO_ON;
+	}
+	//如果没有uri 或 域名后面加/ 都不需要处理
+	if ((con->uri.path->used) == 0
+			|| con->uri.path->ptr[con->uri.path->used - 2] == '/') {
+		return HANDLER_GO_ON;
+	}
+	if(NULL == strstr(con->uri.path->ptr, URI_SEPARATOR)) {
+		return HANDLER_GO_ON;
+	}
+	char *fileExt = NULL;
+	int fileExtLen = 0;
+	int urlLen = con->uri.path->used - 1;
+	char *urlStr = con->uri.path->ptr + urlLen;
+	if (urlLen > 3 && 0 == memcmp(EXT_JS, urlStr - 3, 3)) {
+		fileExt = EXT_JS;
+		fileExtLen = 3;
+	}else if (urlLen > 4 && 0 == memcmp(EXT_CSS, urlStr - 4, 4)) {
+		fileExt = EXT_CSS;
+		fileExtLen = 4;
+	}
+	if(NULL == fileExt || 0 == fileExtLen) {
 		return HANDLER_GO_ON;
 	}
 
@@ -346,41 +335,30 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 	}
 
 	//uri 做分割操作
-	fileObjectWrapper fObjectWrapper;
+	FileObjectWrapper fObjectWrapper;
 	fObjectWrapper.contentType = NULL;
-	fObjectWrapper.fObject = NULL;
+	fObjectWrapper.fileObject = NULL;
 	fObjectWrapper.lastModified = 0;
 	fObjectWrapper.totalSize = 0;
 	fObjectWrapper.fileExt = buffer_init();
-
-	char *urlStr = con->uri.path->ptr + con->uri.path->used - 1;
-	if (0 == memcmp(EXT_JS, urlStr - 3, 3)) {
-		buffer_copy_string_len(fObjectWrapper.fileExt, EXT_JS, 3);
-	}
-	if (0 == memcmp(EXT_CSS, urlStr - 4, 4)) {
-		buffer_copy_string_len(fObjectWrapper.fileExt, EXT_CSS, 4);
-	}
+	buffer_copy_string_len(fObjectWrapper.fileExt, fileExt, fileExtLen);
 
 	uriSplit(srv, con, &fObjectWrapper, fixedDocRoot);
-
-	if(NULL == fObjectWrapper.fObject) {
+	if(NULL == fObjectWrapper.fileObject) {
 		if (con->conf.log_request_handling) {
 			log_error_write(srv, __FILE__, __LINE__,  "s",  "-- fObjectWrapper is NULL");
 		}
 		return HANDLER_GO_ON;
 	}
-
 	buffer *mtime = strftime_cache_get(srv, fObjectWrapper.lastModified);
 	if (con->conf.log_request_handling) {
 		log_error_write(srv, LDLOG_MARK, "sbsss",
 				"last_modified[", mtime,
 				"]http_if_modified_since [", con->request.http_if_modified_since, "]");
 	}
-
 	if (HANDLER_FINISHED == http_response_cachable(srv, con, mtime)) {
 		return HANDLER_FINISHED;
 	}
-
 	buffer *filePath = createFilePath(srv, con, &fObjectWrapper);
 
 	buffer *combinedFullPath = buffer_init();
@@ -391,7 +369,6 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 	if (con->conf.log_request_handling) {
 		log_error_write(srv, LDLOG_MARK,  "sb",  "-- combinedFullPath", combinedFullPath);
 	}
-
 	time_t combinedMtime = 0;
 	stat_cache_entry *sce = NULL;
 	if(HANDLER_ERROR != stat_cache_get_entry(srv, con, combinedFullPath, &sce)) {
@@ -406,10 +383,10 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 		}
 		if(0 == combinResult) {
 			/**
-			 * if file combine not finished then wait 1 second
+			 * if file combine not finished then wait 10 ms
 			 */
 			log_error_write(srv, LDLOG_MARK,  "sb",  "--fileCombining sleep", combinedFullPath);
-			sleep(1);
+			usleep(10000);
 		}
 	}
 
@@ -436,11 +413,11 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 	buffer_free(combinedFullPath);
 	buffer_free(fObjectWrapper.fileExt);
 
-	fileObject *freeObject = fObjectWrapper.fObject;
+	FileObject *freeObject = fObjectWrapper.fileObject;
 	while (NULL != freeObject) {
-		fileObject *tmpFreeObject = freeObject;
+		FileObject *tmpFreeObject = freeObject;
 		buffer_free(tmpFreeObject->filePath);
-		freeObject = freeObject->nextItem;
+		freeObject = (FileObject *)  freeObject->nextItem;
 		free(tmpFreeObject);
 	}
 	return HANDLER_GO_ON;
@@ -454,7 +431,6 @@ INIT_FUNC(mod_styleUriSplit_init) {
 SETDEFAULTS_FUNC(mod_styleUriSplit_set_defaults) {
 	plugin_data *p = p_d;
 	size_t i = 0;
-
 	config_values_t cv[] = {
 			//合并好的文件存放目录
 			{ "styleUriSplit.combine-fileDir", NULL, T_CONFIG_STRING, T_CONFIG_SCOPE_SERVER },
@@ -464,7 +440,7 @@ SETDEFAULTS_FUNC(mod_styleUriSplit_set_defaults) {
 	p->config_storage = calloc(1, srv->config_context->used * sizeof(specific_config *));
 
 	for (i = 0; i < srv->config_context->used; i++) {
-		plugin_config *s = malloc(sizeof(plugin_config));
+		plugin_config *s = (plugin_config *) malloc(sizeof(plugin_config));
 
 		s->combineFileDir = buffer_init();
 		cv[0].destination = s->combineFileDir;
@@ -514,13 +490,9 @@ SETDEFAULTS_FUNC(mod_styleUriSplit_set_defaults) {
 
 FREE_FUNC(mod_styleUriSplit_free) {
 	plugin_data *p = p_d;
-
-	UNUSED(srv);
-
 	if (!p) {
 		return HANDLER_GO_ON;
 	}
-
 	if (p->config_storage) {
 		size_t i;
 		for(i = 0; i < srv->config_context->used; i++) {
@@ -537,13 +509,10 @@ FREE_FUNC(mod_styleUriSplit_free) {
 int mod_styleUriSplit_plugin_init(plugin *p) {
 	p->version = LIGHTTPD_VERSION_ID;
 	p->name = buffer_init_string("mod_styleUriSplit");
-
 	p->init = mod_styleUriSplit_init;
 	p->handle_physical = mod_styleUriSplit_physical;
 	p->set_defaults = mod_styleUriSplit_set_defaults;
-
 	p->cleanup = mod_styleUriSplit_free;
-
 	p->data = NULL;
 	return 0;
 }
