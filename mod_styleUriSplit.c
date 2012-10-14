@@ -184,7 +184,7 @@ static int fileCombining(server *srv, connection *con, FileObjectWrapper *fObjec
 	 * 同时写到head的last_modified中，用户其它模块生成Etag或修改时间比较保持统一。
 	 */
 	struct utimbuf newTime;
-	newTime.modtime = fObjectWrapper->lastModified;
+	newTime.actime = fObjectWrapper->lastModified;
 	newTime.modtime = fObjectWrapper->lastModified;
 	if(-1 == utime(targetFileTmp->ptr, &newTime)) {
 		log_error_write(srv, LDLOG_MARK, "sbss", "utime error==>targetFileTmp:", targetFileTmp,
@@ -290,7 +290,7 @@ static int mod_styleUriSplit_patch_connection(server *srv, connection *con, plug
 
 PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 	if (con->conf.log_request_handling) {
-		log_error_write(srv, LDLOG_MARK,  "s",  "-- handling mod_styleUriSplit_physical start");
+		log_error_write(srv, LDLOG_MARK,  "s",  "-- handling mod_styleUriSplit_physical 1.0.1 start");
 	}
 	// request checker
 	if (con->request.http_method != HTTP_METHOD_GET
