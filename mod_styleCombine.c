@@ -43,9 +43,9 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 #define CSS_SUFFIX_TXT "\" />"
 
 #define BUFFER_PIECE_SIZE 128
-
 #define DEFAULT_CONTENT_LEN (1024 << 8) //262144
 #define DOMAIN_COUNTS 2
+#define MAX_STYLE_TAG_LEN 2183
 
 int JS_TAG_PREFIX_LEN = 0, JS_TAG_SUFFIX_LEN = 0;
 int JS_TAG_EXT_PREFIX_LEN = 0, JS_TAG_EXT_SUFFIX_LEN = 0;
@@ -88,7 +88,7 @@ struct ListNode {
     const void *value;
 };
 typedef struct {
-	off_t                 size;
+	unsigned int          size;
 	ListNode             *first;
 	ListNode             *head;
 } LinkedList;
@@ -633,9 +633,9 @@ static void combineStyles(CombineConfig *pConfig, TagConfig *tagConfig, LinkedLi
 		} else {
 			count++;
 		}
-		//url拼接在一起的长度超过配置的长度，则需要分成多个请求来处理。
+		//url拼接在一起的长度超过配置的长度，则需要分成多个请求来处理。(域名+uri+下一个uri +版本长度 + 参数名称长度[版本长度36 + 参数名称长度4])
 		int urlLen = (tagConfig->domain->used + tmpUriBuf->used + styleField->styleUri->used);
-		if (urlLen >= pConfig->maxUrlLen) {
+		if (urlLen + 40  >= pConfig->maxUrlLen) {
 			//将合并的url最后一个|字符去除
 			tmpUriBuf->ptr[--tmpUriBuf->used] = ZERO_END;
 			tagConfig->styleUri = tmpUriBuf;
@@ -653,9 +653,24 @@ static void combineStyles(CombineConfig *pConfig, TagConfig *tagConfig, LinkedLi
 	return;
 }
 
-//var tt="{"group1":{"css":"http://xx/a1.css","js":"http://xx/a1.js"},"group2":{"js":"http://xx/a2.js"}}"
+static void addAsyncStyle(apr_pool_t *pool, buffer *buf, buffer *versionBuf, int styleType) {
+	if (styleType) {
+		stringAppend(pool, buf, EXT_JS, 3);
+	} else {
+		stringAppend(pool, buf, EXT_CSS, 4);
+	}
+	stringAppend(pool, buf, "?_v=", 4);
+	stringAppend(pool, buf, versionBuf->ptr, versionBuf->used);
+	if (styleType) {
+		stringAppend(pool, buf, EXT_JS, 3);
+	} else {
+		stringAppend(pool, buf, EXT_CSS, 4);
+	}
+}
+
+//var tt="{"group1":{"css":["http://xx/a1.css"],"js":["http://xx/a1.js"]},"group2":{"css":[],"js":["http://xx/a2.js"]}}"
 static void combineStylesAsync(request_rec *r, CombineConfig *pConfig, StyleList *styleList,
-								buffer *combinedStyleBuf[], buffer *versionBuf) {
+								buffer *combinedStyleBuf[], buffer *tmpUriBuf, buffer *versionBuf) {
 	if(NULL == styleList || NULL == pConfig || NULL == combinedStyleBuf) {
 		return;
 	}
@@ -668,42 +683,53 @@ static void combineStylesAsync(request_rec *r, CombineConfig *pConfig, StyleList
 		LinkedList *list = styleList->list[i];
 		if(NULL == list) {
 			if(i) {
-				stringAppend(r->pool, headBuf, "'js':''", 7); // "js":""
+				stringAppend(r->pool, headBuf, "'js':[]", 7); // "js":[]
+			} else {
+				stringAppend(r->pool, headBuf, ":[],", 4); // "css":[],
 			}
 			continue;
 		}
 		if(i) {
 			stringAppend(r->pool, headBuf, "'js'", 4);
 		}
-		stringAppend(r->pool, headBuf, ":'", 2);
+		buffer_clean(tmpUriBuf);
+		buffer_clean(versionBuf);
+		stringAppend(r->pool, headBuf, ":[", 2);
 		ListNode *node = list->first;
 		StyleField *styleField = (StyleField *) node->value;
-		stringAppend(r->pool, headBuf, pConfig->newDomains[styleField->domainIndex]->ptr, pConfig->newDomains[styleField->domainIndex]->used);
+		buffer *domain = pConfig->newDomains[styleField->domainIndex];
+		stringAppend(r->pool, tmpUriBuf, domain->ptr, domain->used);
 		for(k = 0; NULL != node; k++) {
 			styleField = (StyleField *) node->value;
 			cleanExt(styleField);
 			if(list->size >= k + 1 && k != 0) {
-				stringAppend(r->pool, headBuf, URI_SEPARATOR, 1);
+				stringAppend(r->pool, tmpUriBuf, URI_SEPARATOR, 1);
 			}
-			stringAppend(r->pool, headBuf, styleField->styleUri->ptr, styleField->styleUri->used);
+			stringAppend(r->pool, tmpUriBuf, styleField->styleUri->ptr, styleField->styleUri->used);
 			stringAppend(r->pool, versionBuf, styleField->version->ptr, styleField->version->used);
+			//url拼接在一起的长度超过配置的长度，则需要分成多个请求来处理。(域名+uri+下一个uri +版本长度 + 参数名称长度[版本长度36 + 参数名称长度4])
+			int urlLen = (domain->used + tmpUriBuf->used + styleField->styleUri->used);
+			if (urlLen + 40  >= pConfig->maxUrlLen) {
+				//将合并的url最后一个|字符去除
+				tmpUriBuf->ptr[--tmpUriBuf->used] = ZERO_END;
+				addAsyncStyle(r->pool, tmpUriBuf, versionBuf, i);
+				stringAppend(r->pool, headBuf, "'", 1);
+				stringAppend(r->pool, headBuf, tmpUriBuf->ptr, tmpUriBuf->used);
+				stringAppend(r->pool, tmpUriBuf, "',", 3);
+				buffer_clean(tmpUriBuf);
+				buffer_clean(versionBuf);
+				stringAppend(r->pool, tmpUriBuf, domain->ptr, domain->used);
+			}
 			node = node->next;
 		}
+		stringAppend(r->pool, headBuf, "'", 1);
+		addAsyncStyle(r->pool, tmpUriBuf, versionBuf, i);
+		stringAppend(r->pool, headBuf, tmpUriBuf->ptr, tmpUriBuf->used);
 		if (i) {
-			stringAppend(r->pool, headBuf, EXT_JS, 3);
+			stringAppend(r->pool, headBuf, "']", 2);
 		} else {
-			stringAppend(r->pool, headBuf, EXT_CSS, 4);
+			stringAppend(r->pool, headBuf, "'],", 3);
 		}
-		stringAppend(r->pool, headBuf, "?_v=", 4);
-		stringAppend(r->pool, headBuf, versionBuf->ptr, versionBuf->used);
-		if (i) {
-			stringAppend(r->pool, headBuf, EXT_JS, 3);
-			stringAppend(r->pool, headBuf, "'", 1);
-		} else {
-			stringAppend(r->pool, headBuf, EXT_CSS, 4);
-			stringAppend(r->pool, headBuf, "',", 2);
-		}
-		buffer_clean(versionBuf);
 	}
 	stringAppend(r->pool, headBuf, "},", 2);
 }
@@ -943,7 +969,7 @@ static inline char *strSearch(const char *str1, int **matchedType, int **isExpre
 }
 
 static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBuf, CombineConfig *pConfig, CombineCtx *ctx) {
-	char *maxTagBuf = (char *) apr_palloc(r->pool,(pConfig->maxUrlLen + 100));
+	char *maxTagBuf = (char *) apr_palloc(r->pool, MAX_STYLE_TAG_LEN);
 	if(NULL == maxTagBuf) {
 		return 0;
 	}
@@ -956,7 +982,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 	LinkedList *asyncGroups[DOMAIN_COUNTS];
 	apr_hash_t *domains[DOMAIN_COUNTS];
 	apr_hash_t *duplicates = apr_hash_make(r->pool);
-	int maxTagSize = (pConfig->maxUrlLen + 98);
+	int maxTagSize = MAX_STYLE_TAG_LEN - 10;
 	int *matchedType = 0, *isExpression = 0;
 	register int  i = 0, k = 0, isProcessed = 0,combinBufSize = 100;
 	register ParserTag *ptag = NULL;
@@ -1137,6 +1163,11 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 				ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "if(isProcessed){has Error}:[%s]", r->unparsed_uri);
 				return 0;
 			}
+			buffer *tmpUriBuf = buffer_init_size(r->pool, pConfig->maxUrlLen + 50);
+			if(!tmpUriBuf) {
+				ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "if(isProcessed){has Error}:[%s]", r->unparsed_uri);
+				return 0;
+			}
 			int addScriptPic = 0;
 			for(i = 0; i < DOMAIN_COUNTS; i++) {
 				LinkedList *asyncList = asyncGroups[i];
@@ -1156,7 +1187,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 					stringAppend(r->pool, combinedStyleBuf[HEAD], "=\"{", 3);
 					while(NULL != node) {
 						styleList = (StyleList *) node->value;
-						combineStylesAsync(r, pConfig, styleList, combinedStyleBuf, versionBuf);
+						combineStylesAsync(r, pConfig, styleList, combinedStyleBuf, tmpUriBuf, versionBuf);
 						node = (ListNode *) node->next;
 					}
 					--combinedStyleBuf[HEAD]->used;
@@ -1168,11 +1199,6 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 			}
 			//2、将外部引入的js/css进行合并
 			if(NULL != syncGroupList && NULL != (node = syncGroupList->first)) {
-				buffer *tmpUriBuf = buffer_init_size(r->pool, pConfig->maxUrlLen + 50);
-				if(!tmpUriBuf) {
-					ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "if(isProcessed){has Error}:[%s]", r->unparsed_uri);
-					return 0;
-				}
 				while(NULL != node) {
 					StyleList *styleList = (StyleList *) node->value;
 					for(i = 0; i < 2; i++) {
@@ -1192,7 +1218,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 			combineStylesDebug(pConfig, tagConfig, syncGroupList, combinedStyleBuf);
 			for(i = 0; i < DOMAIN_COUNTS; i++) {
 				LinkedList *asyncList = asyncGroups[i];
-				if(NULL == asyncList) {
+				if(NULL != asyncList) {
 					combineStylesDebug(pConfig, tagConfig, asyncList, combinedStyleBuf);
 				}
 			}
@@ -1272,7 +1298,7 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 	 * see http://support.microsoft.com/kb/208427/EN-US
 	 * default len for ie 2083 char
 	 */
-	pConfig->maxUrlLen = 2083;
+	pConfig->maxUrlLen = 1500;
 
 	jsPtag = apr_palloc(p, sizeof(ParserTag));
 	if(NULL == jsPtag) {
@@ -1557,7 +1583,7 @@ static const char *setNewDomains(cmd_parms *cmd, void *dummy, const char *arg) {
 
 static const char *setAsyncVariableNames(cmd_parms *cmd, void *dummy, const char *arg) {
 	CombineConfig *pConfig = ap_get_module_config(cmd->server->module_config, &styleCombine_module);
-	if ((NULL == arg) || (strlen(arg) <= 1)) {
+	if ((NULL == arg) || (strlen(arg) < 1)) {
 		return "styleCombine new domain value may not be null";
 	} else {
 		stringSplit(cmd->pool, DOMAIN_COUNTS, pConfig->asyncVariableNames, apr_pstrdup(cmd->pool, arg), ';');
@@ -1568,7 +1594,7 @@ static const char *setAsyncVariableNames(cmd_parms *cmd, void *dummy, const char
 static const char *setMaxUrlLen(cmd_parms *cmd, void *dummy, const char *arg) {
 	CombineConfig *pConfig = ap_get_module_config(cmd->server->module_config, &styleCombine_module);
 	int len = 0;
-	if ((NULL == arg) || (len = atoi(arg)) < pConfig->maxUrlLen) {
+	if ((NULL == arg) || (len = atoi(arg)) < 1) {
 		ap_log_error(APLOG_MARK, LOG_ERR, 0, cmd->server, "maxUrlLen too small, will set default  2083!");
 	} else {
 		pConfig->maxUrlLen = len;
@@ -1651,9 +1677,35 @@ static const command_rec styleCombineCmds[] =
 		{ NULL }
 };
 
+static void configRequired(server_rec *s, char *name, void * value) {
+	if(NULL == value) {
+		ap_log_error(APLOG_MARK, LOG_ERR, 0, s, "config [%s] value can't be null or empty", name);
+	}
+}
 static apr_status_t styleCombine_post_conf(apr_pool_t *p, apr_pool_t *plog,
 											apr_pool_t *tmp, server_rec *s) {
 	ap_add_version_component(p, MODULE_BRAND);
+	CombineConfig *pConfig = NULL;
+	pConfig = ap_get_module_config(s->module_config, &styleCombine_module);
+	configRequired(s, "pconfig", pConfig);
+	configRequired(s, "appName", pConfig->appName);
+	configRequired(s, "filterCntType", pConfig->filterCntType);
+	configRequired(s, "versionFilePath", pConfig->versionFilePath);
+	int i = 0, domainCount = 0;
+	for(i = 0; i < DOMAIN_COUNTS; i++) {
+		if(NULL == pConfig->newDomains[i] && NULL == pConfig->oldDomains[i]) {
+			continue;
+		}
+		if(pConfig->newDomains[i] && pConfig->oldDomains[i]) {
+			++domainCount;
+			continue;
+		}
+		configRequired(s, "newDomains", pConfig->newDomains[i]);
+		configRequired(s, "oldDomains", pConfig->oldDomains[i]);
+	}
+	for(i = 0; i < domainCount; i++) {
+		configRequired(s, "asyncVariableNames", pConfig->asyncVariableNames[i]);
+	}
 	return APR_SUCCESS;
 }
 
