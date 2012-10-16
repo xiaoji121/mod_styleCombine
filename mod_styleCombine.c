@@ -399,8 +399,7 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 	}
 	//domain find & checker
 	off_t tagLen = ptag->prefix->used + ptag->refTag->used;
-	//FIXME: HAS BUG
-	if(maxTagLen <= (pConfig->oldDomains[0]->used + (tagLen + 1))){
+	if(maxTagLen <= (tagLen + 1)){
 		return NULL;
 	}
 	buffer *domain = NULL;
@@ -1044,7 +1043,6 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 			subHtml = curPoint;
 			continue;
 		}
-		//FIXME:去重部分，对于异步与同步加载的js来说需要特别处理，否则会出错
 		//clean duplicate
 		if(!styleField->async && isRepeat(r, duplicates, styleField)) {
 			subHtml = curPoint;
@@ -1126,35 +1124,34 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 			if(NULL == asyncList) {
 				continue;
 			}
-			if(NULL != (node = asyncList->first)) {
-				while(NULL != node) {
-					StyleList *styleList = (StyleList *) node->value;
-					for(i = 0; i < 2; i++) {
-						LinkedList *list = styleList->list[i];
-						if(NULL == list) {
+			node = asyncList->first;
+			while(NULL != node) {
+				StyleList *styleList = (StyleList *) node->value;
+				for(i = 0; i < 2; i++) {
+					LinkedList *list = styleList->list[i];
+					if(NULL == list) {
+						continue;
+					}
+					ListNode *parentNode = NULL;
+					ListNode *styleNode = (ListNode *) list->first;
+					while(NULL != styleNode) {
+						StyleField *styleField = (StyleField *) styleNode->value;
+						if(isRepeat(r, duplicates, styleField)) {
+							//if exeist delete this node
+							if(NULL == parentNode) {
+								list->first = styleNode->next;
+							} else {
+								parentNode->next = styleNode->next;
+							}
+							styleNode = styleNode->next;
+							--list->size;
 							continue;
 						}
-						ListNode *parentNode = NULL;
-						ListNode *styleNode = (ListNode *) list->first;
-						while(NULL != styleNode) {
-							StyleField *styleField = (StyleField *) styleNode->value;
-							if(isRepeat(r, duplicates, styleField)) {
-								//if exeist delete this node
-								if(NULL == parentNode) {
-									list->first = styleNode->next;
-								} else {
-									parentNode->next = styleNode->next;
-								}
-								styleNode = styleNode->next;
-								--list->size;
-								continue;
-							}
-							parentNode = styleNode;
-							styleNode = styleNode->next;
-						}
+						parentNode = styleNode;
+						styleNode = styleNode->next;
 					}
-					node = node->next;
 				}
+				node = node->next;
 			}
 		}
 		if(0 == ctx->debugMode) {
