@@ -1476,14 +1476,12 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 	for (pbktIn = APR_BRIGADE_FIRST(pbbIn);
 	            pbktIn != APR_BRIGADE_SENTINEL(pbbIn);
 	            pbktIn = APR_BUCKET_NEXT(pbktIn)) {
-		//the end
 		if(APR_BUCKET_IS_EOS(pbktIn)) {
 			isEOS = 1;
 			break;
 		}
 		const char *data;
-		apr_size_t len;
-		//read len
+		apr_size_t len; //read len
 		apr_bucket_read(pbktIn, &data, &len, APR_BLOCK_READ);
 		stringAppend(r->pool, ctx->buf, (char *) data, len);
 		apr_bucket_delete(pbktIn);
@@ -1674,20 +1672,26 @@ static const command_rec styleCombineCmds[] =
 		{ NULL }
 };
 
-static void configRequired(server_rec *s, char *name, void * value) {
+static int configRequired(server_rec *s, char *name, void * value) {
 	if(NULL == value) {
-		ap_log_error(APLOG_MARK, LOG_ERR, 0, s, "config [%s] value can't be null or empty", name);
+		ap_log_error(APLOG_MARK, LOG_ERR, 0, s, "mod_styleCombine config [%s] value can't be null or empty", name);
+		return 1;
 	}
+	return 0;
 }
 static apr_status_t styleCombine_post_conf(apr_pool_t *p, apr_pool_t *plog,
 											apr_pool_t *tmp, server_rec *s) {
 	ap_add_version_component(p, MODULE_BRAND);
+	int resultCount = 0;
 	CombineConfig *pConfig = NULL;
 	pConfig = ap_get_module_config(s->module_config, &styleCombine_module);
-	configRequired(s, "pconfig", pConfig);
-	configRequired(s, "appName", pConfig->appName);
-	configRequired(s, "filterCntType", pConfig->filterCntType);
-	configRequired(s, "versionFilePath", pConfig->versionFilePath);
+	resultCount += configRequired(s, "pconfig", pConfig);
+	if(resultCount) {
+		return !OK;
+	}
+	resultCount += configRequired(s, "appName", pConfig->appName);
+	resultCount += configRequired(s, "filterCntType", pConfig->filterCntType);
+	resultCount += configRequired(s, "versionFilePath", pConfig->versionFilePath);
 	int i = 0, domainCount = 0;
 	for(i = 0; i < DOMAIN_COUNTS; i++) {
 		if(NULL == pConfig->newDomains[i] && NULL == pConfig->oldDomains[i]) {
@@ -1697,23 +1701,20 @@ static apr_status_t styleCombine_post_conf(apr_pool_t *p, apr_pool_t *plog,
 			++domainCount;
 			continue;
 		}
-		configRequired(s, "newDomains", pConfig->newDomains[i]);
-		configRequired(s, "oldDomains", pConfig->oldDomains[i]);
+		resultCount += configRequired(s, "newDomains", pConfig->newDomains[i]);
+		resultCount += configRequired(s, "oldDomains", pConfig->oldDomains[i]);
 	}
 	for(i = 0; i < domainCount; i++) {
-		configRequired(s, "asyncVariableNames", pConfig->asyncVariableNames[i]);
+		resultCount += configRequired(s, "asyncVariableNames", pConfig->asyncVariableNames[i]);
 	}
-	return APR_SUCCESS;
+	if(resultCount) {
+		return !OK;
+	}
+	return OK;
 }
 
-static void styleCombine_init(apr_pool_t *p, server_rec *s) {
-	CombineConfig * pConfig = ap_get_module_config(s->module_config, &styleCombine_module);
-	if(NULL != pConfig) {
-	}
-}
 static void styleCombine_register_hooks(apr_pool_t *p) {
 	ap_hook_post_config(styleCombine_post_conf, NULL, NULL, APR_HOOK_MIDDLE);
-	ap_hook_child_init(styleCombine_init, NULL, NULL, APR_HOOK_MIDDLE);
 	ap_hook_insert_filter(styleCombineInsert, NULL, NULL, APR_HOOK_MIDDLE);
     ap_register_output_filter(STYLE_COMBINE_NAME, styleCombineOutputFilter, NULL, AP_FTYPE_RESOURCE);
     return;
