@@ -63,6 +63,19 @@ typedef struct {
 	buffer     *fileExt;
 } FileObjectWrapper;
 
+void fileObjectWrapper_free(FileObjectWrapper * fObjectWrapper) {
+	if(NULL == fObjectWrapper) {
+		return;
+	}
+	FileObject *fileObject = fObjectWrapper->fileObject;
+	while (NULL != fileObject) {
+		FileObject *freeObject = fileObject;
+		buffer_free(freeObject->filePath);
+		fileObject = (FileObject *)  freeObject->nextItem;
+		free(freeObject);
+	}
+	buffer_free(fObjectWrapper->fileExt);
+}
 /**
  * 获取uri中是所需要的文件后缀，只支持.js/.css 其它文件后缀无法获取，返回NULL
  */
@@ -344,10 +357,12 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 	buffer_copy_string_len(fObjectWrapper.fileExt, fileExt, fileExtLen);
 
 	uriSplit(srv, con, &fObjectWrapper, fixedDocRoot);
+	buffer_free(fixedDocRoot); //free
 	if(NULL == fObjectWrapper.fileObject) {
 		if (con->conf.log_request_handling) {
 			log_error_write(srv, __FILE__, __LINE__,  "s",  "-- fObjectWrapper is NULL");
 		}
+		fileObjectWrapper_free(&fObjectWrapper);
 		return HANDLER_GO_ON;
 	}
 	buffer *mtime = strftime_cache_get(srv, fObjectWrapper.lastModified);
@@ -357,6 +372,7 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 				"]http_if_modified_since [", con->request.http_if_modified_since, "]");
 	}
 	if (HANDLER_FINISHED == http_response_cachable(srv, con, mtime)) {
+		fileObjectWrapper_free(&fObjectWrapper);
 		return HANDLER_FINISHED;
 	}
 	buffer *filePath = createFilePath(srv, con, &fObjectWrapper);
@@ -389,7 +405,6 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 			usleep(10000);
 		}
 	}
-
 	buffer_copy_string_buffer(con->uri.path, filePath);
 	/**
 	 * 修改文件的物理路径为指定的路径
@@ -408,18 +423,9 @@ PHYSICALPATH_FUNC(mod_styleUriSplit_physical) {
 		log_error_write(srv, __FILE__, __LINE__,  "sb", "URI         :", con->uri.path);
 	}
 	//free no used buff
-	buffer_free(fixedDocRoot);
 	buffer_free(filePath);
 	buffer_free(combinedFullPath);
-	buffer_free(fObjectWrapper.fileExt);
-
-	FileObject *freeObject = fObjectWrapper.fileObject;
-	while (NULL != freeObject) {
-		FileObject *tmpFreeObject = freeObject;
-		buffer_free(tmpFreeObject->filePath);
-		freeObject = (FileObject *)  freeObject->nextItem;
-		free(tmpFreeObject);
-	}
+	fileObjectWrapper_free(&fObjectWrapper);
 	return HANDLER_GO_ON;
 }
 
