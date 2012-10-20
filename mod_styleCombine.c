@@ -1191,14 +1191,14 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 					stringAppend(r->pool, combinedStyleBuf[HEAD], "var ", 4);
 					buffer *variableName = pConfig->asyncVariableNames[styleList->domainIndex];
 					stringAppend(r->pool, combinedStyleBuf[HEAD], variableName->ptr, variableName->used);
-					stringAppend(r->pool, combinedStyleBuf[HEAD], "=\"{", 3);
+					stringAppend(r->pool, combinedStyleBuf[HEAD], "='{", 3);
 					while(NULL != node) {
 						styleList = (StyleList *) node->value;
 						combineStylesAsync(r, pConfig, styleList, combinedStyleBuf, tmpUriBuf, versionBuf);
 						node = (ListNode *) node->next;
 					}
 					--combinedStyleBuf[HEAD]->used;
-					stringAppend(r->pool, combinedStyleBuf[HEAD], "}\";\n", 4);
+					stringAppend(r->pool, combinedStyleBuf[HEAD], "}';\n", 4);
 				}
 			}
 			if(addScriptPic) {
