@@ -184,7 +184,7 @@ StyleField *style_field_create(apr_pool_t *pool) {
 	return styleField;
 }
 
-buffer *buffer_init_size(apr_pool_t *pool, unsigned int in_size) {
+buffer *buffer_init_size(apr_pool_t *pool, size_t in_size) {
 	buffer *buf = (buffer *) apr_palloc(pool, sizeof(buffer));
 	if(NULL == buf) {
 		return buf;
@@ -197,7 +197,7 @@ buffer *buffer_init_size(apr_pool_t *pool, unsigned int in_size) {
 	}
 	return buf;
 }
-int prepare_buffer_size(apr_pool_t *pool, buffer *buf, unsigned int in_size) {
+int prepare_buffer_size(apr_pool_t *pool, buffer *buf, size_t in_size) {
 	if(NULL == buf) {
 		return 0;
 	}
@@ -677,22 +677,23 @@ static void combineStylesAsync(request_rec *r, CombineConfig *pConfig, StyleList
 		return;
 	}
 	buffer *headBuf = combinedStyleBuf[HEAD];
+	headBuf->ptr[headBuf->used++] = '\\';
 	headBuf->ptr[headBuf->used++] = '"';
 	stringAppend(r->pool, headBuf, styleList->group->ptr, styleList->group->used - 1);
-	stringAppend(r->pool, headBuf, "\":{\"css\"", 8);
+	stringAppend(r->pool, headBuf, "\\\":{\\\"css\\\"", 11);
 	unsigned int i = 0, k = 0, count = 0;
 	for(i = 0; i < 2; i++) {
 		LinkedList *list = styleList->list[i];
 		if(NULL == list) {
 			if(i) {
-				stringAppend(r->pool, headBuf, "\"js\":[]", 7); // "js":[]
+				stringAppend(r->pool, headBuf, "\\\"js\\\":[]", 9); // "js":[]
 			} else {
 				stringAppend(r->pool, headBuf, ":[],", 4); // "css":[],
 			}
 			continue;
 		}
 		if(i) {
-			stringAppend(r->pool, headBuf, "\"js\"", 4);
+			stringAppend(r->pool, headBuf, "\\\"js\\\"", 6);
 		}
 		buffer_clean(tmpUriBuf);
 		buffer_clean(versionBuf);
@@ -713,13 +714,13 @@ static void combineStylesAsync(request_rec *r, CombineConfig *pConfig, StyleList
 				tmpUriBuf->ptr[--tmpUriBuf->used] = ZERO_END;
 				addAsyncStyle(r->pool, tmpUriBuf, versionBuf, i);
 				//copy to head
-				stringAppend(r->pool, headBuf, "\"", 1);
+				stringAppend(r->pool, headBuf, "\\\"", 2);
 				stringAppend(r->pool, headBuf, tmpUriBuf->ptr, tmpUriBuf->used);
 				buffer_clean(tmpUriBuf);
 				buffer_clean(versionBuf);
 				//if not the end
 				if(list->size >= count + 1) {
-					stringAppend(r->pool, headBuf, "\",", 2);
+					stringAppend(r->pool, headBuf, "\\\",", 3);
 					stringAppend(r->pool, tmpUriBuf, domain->ptr, domain->used);
 					k = -1;
 				}
@@ -730,14 +731,14 @@ static void combineStylesAsync(request_rec *r, CombineConfig *pConfig, StyleList
 			node = node->next;
 		}
 		if(tmpUriBuf->used) {
-			stringAppend(r->pool, headBuf, "\"", 1);
+			stringAppend(r->pool, headBuf, "\\\"", 2);
 			addAsyncStyle(r->pool, tmpUriBuf, versionBuf, i);
 		}
 		stringAppend(r->pool, headBuf, tmpUriBuf->ptr, tmpUriBuf->used);
 		if (i) {
-			stringAppend(r->pool, headBuf, "\"]", 2);
+			stringAppend(r->pool, headBuf, "\\\"]", 3);
 		} else {
-			stringAppend(r->pool, headBuf, "\"],", 3);
+			stringAppend(r->pool, headBuf, "\\\"],", 4);
 		}
 	}
 	stringAppend(r->pool, headBuf, "},", 2);
@@ -1191,14 +1192,14 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 					stringAppend(r->pool, combinedStyleBuf[HEAD], "var ", 4);
 					buffer *variableName = pConfig->asyncVariableNames[styleList->domainIndex];
 					stringAppend(r->pool, combinedStyleBuf[HEAD], variableName->ptr, variableName->used);
-					stringAppend(r->pool, combinedStyleBuf[HEAD], "='{", 3);
+					stringAppend(r->pool, combinedStyleBuf[HEAD], "=\"{", 3);
 					while(NULL != node) {
 						styleList = (StyleList *) node->value;
 						combineStylesAsync(r, pConfig, styleList, combinedStyleBuf, tmpUriBuf, versionBuf);
 						node = (ListNode *) node->next;
 					}
 					--combinedStyleBuf[HEAD]->used;
-					stringAppend(r->pool, combinedStyleBuf[HEAD], "}';\n", 4);
+					stringAppend(r->pool, combinedStyleBuf[HEAD], "}\";\n", 4);
 				}
 			}
 			if(addScriptPic) {
