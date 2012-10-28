@@ -149,7 +149,7 @@ typedef struct {
 	apr_time_t    mtime;
 } StyleVersionEntry;
 
-StyleVersionEntry svEntry;
+StyleVersionEntry svsEntry;
 
 void fillTagConfigParams(TagConfig *tagConfig, buffer *version,
 		int isNewLine, int styleType, int needExt) {
@@ -293,8 +293,10 @@ buffer *getStrVersion(request_rec *r, buffer *styleUri, CombineConfig *pConfig){
 	}
 	void *data;
 	const char *strVersion = NULL;
-	if(NULL != svEntry.styleTable) {
-		strVersion = apr_table_get(svEntry.styleTable, styleUri->ptr);
+	if(NULL != svsEntry.styleTable) {
+		strVersion = apr_table_get(svsEntry.styleTable, styleUri->ptr);
+		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
+						"==can't getVersion:ReqURI:[%s]==>StyleURI:[%s]", r->unparsed_uri, styleUri->ptr);
 	}
 	if(NULL == strVersion) {
 		time_t tv;
@@ -346,15 +348,15 @@ static void loadStyleVersion(server_rec *server, apr_pool_t *req_pool, CombineCo
 	}
 	prevTime = tm;
 	apr_status_t rc = apr_stat(&finfo, pConfig->versionFilePath, APR_FINFO_MIN, req_pool);
-	if(APR_SUCCESS != rc || finfo.mtime == svEntry.mtime) {
+	if(APR_SUCCESS != rc || finfo.mtime == svsEntry.mtime) {
 		return;
 	}
 	if(5 == pConfig->printLog) {
 		ap_log_error(APLOG_MARK, APLOG_ERR, 0, server,
-				"==pid[%d]reload styleVersion File lastLoadTime: %lld == fmtime:%lld", getpid(), svEntry.mtime, finfo.mtime);
+				"==pid[%d]reload styleVersion File lastLoadTime: %lld == fmtime:%lld", getpid(), svsEntry.mtime, finfo.mtime);
 	}
 	//modify the mtime
-	svEntry.mtime = finfo.mtime;
+	svsEntry.mtime = finfo.mtime;
 	rc = apr_file_open(&fd, pConfig->versionFilePath, APR_READ | APR_BINARY | APR_XTHREAD,
 					   APR_OS_DEFAULT, req_pool);
 	if(rc != APR_SUCCESS) {
@@ -376,18 +378,18 @@ static void loadStyleVersion(server_rec *server, apr_pool_t *req_pool, CombineCo
 			apr_file_close(fd);
 			return;
 		}
-		svEntry.newPool = newPool;
+		svsEntry.newPool = newPool;
 		//create new table
 		apr_table_t  *newTable = apr_table_make(newPool, styleTableSize);
 		formatParser(newTable, versionBuf, server);
-		svEntry.styleTable = newTable;
+		svsEntry.styleTable = newTable;
 		// get the module runtime status(off/on)
 		appRunMode = (char *)apr_table_get(newTable, pConfig->appName);
 		//释放老的内存池时，先将新的内存池填上，避免线程安全问题；因为老的内存池其它地方可能还在使用
-		if(NULL != svEntry.oldPool) {
-			apr_pool_destroy((apr_pool_t *) svEntry.oldPool);
+		if(NULL != svsEntry.oldPool) {
+			apr_pool_destroy((apr_pool_t *) svsEntry.oldPool);
 		}
-		svEntry.oldPool = newPool;
+		svsEntry.oldPool = newPool;
 	}
 	apr_file_close(fd);
 	return;
@@ -420,7 +422,6 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 	if (NULL == currURL) {
 		return NULL;
 	}
-
 	//style mark checker only css
 	if(0 == ptag->styleType) {
 		tmpMaxTagBuf = maxTagBuf + ptag->prefix->used + 5; // +5 = {' rel='}
@@ -428,6 +429,7 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 			return NULL;
 		}
 	}
+	register char ch;
 	char *currURI = currURL + domain->used;
 	register int groupLen = 0, hasDo = 0, stop = 0;
 	//min len <script src="">
@@ -436,37 +438,41 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 		return NULL;
 	}
 	while(*currURI) {
-		if(*currURI == '"' || *currURI == '\'' || *currURI == ptag->suffix) {
+		ch = *(currURI++);
+		switch(ch) {
+		case '"':
+			stop = 1;
 			break;
-		}
-		if(isspace(*currURI)) {
-			continue;
-		}
-		switch(*currURI) {
-		case '.':
-			++hasDo;
+		case '\'':
+			stop = 1;
+			break;
+		case '>':
+			stop = 1;
 			break;
 		case '?':
 			//清除uri后面带的参数
 			stop = 1;
 			break;
-		default:
+		case '.':
+			++hasDo;
 			break;
 		}
 		if(stop) {
 			break;
 		}
-		styleUri->ptr[styleUri->used++] = *currURI;
-		++currURI;
+		if(isspace(ch)) {
+			continue;
+		}
+		styleUri->ptr[styleUri->used++] = ch;
 	}
 	if (!hasDo) { //没有带有.js/.css后缀
 		return NULL;
 	}
+	styleUri->ptr[styleUri->used] = ZERO_END;
 	StyleField *styleField = style_field_create(r->pool);
 	if(NULL == styleField) {
 		return NULL;
 	}
-	styleUri->ptr[styleUri->used] = ZERO_END;
 	// get pos & async & group
 	buffer *group = NULL;
 	char *urlStart = currURL - ptag->refTag->used - 1; // -1 == ' '
@@ -482,13 +488,26 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 			case 'p':
 				if(0 == memcmp(++tmpMaxTagBuf, "os=", 3)) {
 					int *posLen = (int *) 0;
-					position = strToPosition((tmpMaxTagBuf += 4), &posLen);
+					tmpMaxTagBuf += 3;
+					if('"' == *tmpMaxTagBuf || '\'' == *tmpMaxTagBuf) {
+						++tmpMaxTagBuf;
+					}
+					while(isspace(*tmpMaxTagBuf)) {
+						++tmpMaxTagBuf;
+					}
+					position = strToPosition((tmpMaxTagBuf), &posLen);
 					tmpMaxTagBuf += (int) posLen;
 				}
 				break;
 			case 'a':
 				if(0 == memcmp(++tmpMaxTagBuf, "sync=", 5)) {
-					tmpMaxTagBuf += 6;
+					tmpMaxTagBuf += 5;
+					if('"' == *tmpMaxTagBuf || '\'' == *tmpMaxTagBuf) {
+						++tmpMaxTagBuf;
+					}
+					while(isspace(*tmpMaxTagBuf)) {
+						++tmpMaxTagBuf;
+					}
 					if(0 == memcmp(tmpMaxTagBuf, "true", 4)) {
 						styleField->async = 1;
 						tmpMaxTagBuf += 4;
@@ -497,8 +516,14 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 				break;
 			case 'g':
 				if(0 == memcmp(++tmpMaxTagBuf, "roup=", 5)) {
-					groupLen = 0;
-					tmpMaxTagBuf += 6;
+					groupLen = 0, stop = 0;
+					tmpMaxTagBuf += 5;
+					if('"' == *tmpMaxTagBuf || '\'' == *tmpMaxTagBuf) {
+						++tmpMaxTagBuf;
+					}
+					while(isspace(*tmpMaxTagBuf)) {
+						++tmpMaxTagBuf;
+					}
 					char *s = tmpMaxTagBuf;
 					while(*s) {
 						switch(*s) {
@@ -508,6 +533,9 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 						case '"':
 							stop = 1;
 							break;
+						case ' ':
+							stop = 1;
+							break;
 						}
 						if(stop) {
 							break;
@@ -515,9 +543,11 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 						++s;
 						++groupLen;
 					}
-					group = buffer_init_size(r->pool, groupLen + 8);
-					stringAppend(r->pool, group, tmpMaxTagBuf, groupLen);
-					tmpMaxTagBuf += groupLen;
+					if(groupLen) {
+						group = buffer_init_size(r->pool, groupLen + 8);
+						stringAppend(r->pool, group, tmpMaxTagBuf, groupLen);
+						tmpMaxTagBuf += groupLen;
+					}
 				}
 				break;
 			default:
@@ -1009,23 +1039,43 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 		ptag = (1 == (int) matchedType ? jsPtag:cssPtag);
 		//1 skip&filter
 		//2 getField {getType, getPos, getAsync, getGroup}
-		for (i = 0; (curPoint[i] != ptag->suffix) && i < maxTagSize; i++) {
-			maxTagBuf[i] = curPoint[i];
+		char ch = 0, suffixChar = ptag->suffix;
+		int spaceChar = 0 , k = 0;
+		for (i = 0; ((ch = *(curPoint++)) != suffixChar) && i < maxTagSize; i++) {
+			//换行直接跳过
+			if('\n' == ch || '\r' == ch) {
+				continue;
+			}
+			if('\t' == ch) { // change \t to space
+				ch = ' ';
+			}
+			if(isspace(ch)) {
+				if(spaceChar) {
+					spaceChar = 1;
+					++maxTagSize;
+					continue;
+				}
+				spaceChar = 1;
+			} else {
+				spaceChar = 0;
+			}
+			maxTagBuf[k++] = ch;
 		}
-		maxTagBuf[i++] = ptag->suffix;
-		curPoint += i;
-		maxTagBuf[i] = ZERO_END;
+		maxTagBuf[k++] = suffixChar;
+		maxTagBuf[k] = ZERO_END;
 		if (ptag->styleType) {
 			/**
 			 * js 的特殊处理，需要将结束符找出来，</script>
 			 * 结束符中间可能有空格或制表符，所以忽略这些
 			 * 如果没有结束符，将不进行处理.
 			 */
-			for(; (isspace(*curPoint) && *curPoint != ZERO_END); curPoint++);
-
+			//clean \r\n \n \t & empty char
+			while(isspace(*curPoint)) {
+				++curPoint;
+			}
 			if (memcmp(ptag->closeTag->ptr, curPoint, ptag->closeTag->used) != 0) {
 				//找不到结束的</script>
-				stringAppend(r->pool, destBuf, maxTagBuf, i);
+				stringAppend(r->pool, destBuf, maxTagBuf, k);
 				subHtml = curPoint;
 				continue;
 			}
@@ -1033,7 +1083,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 		}
 		StyleField *styleField = tagParser(r, pConfig, ptag, maxTagBuf, i);
 		if (NULL == styleField) {
-			stringAppend(r->pool, destBuf, maxTagBuf, i);
+			stringAppend(r->pool, destBuf, maxTagBuf, k);
 			if(ptag->styleType) {
 				stringAppend(r->pool, destBuf, ptag->closeTag->ptr, ptag->closeTag->used);
 			}
@@ -1290,7 +1340,7 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 
 	CSS_PREFIX_LEN = strlen(CSS_PREFIX_TXT);
 	CSS_SUFFIX_LEN = strlen(CSS_SUFFIX_TXT);
-	svEntry.mtime = 0; svEntry.newPool = NULL;svEntry.oldPool = NULL; svEntry.styleTable = NULL;
+	svsEntry.mtime = 0; svsEntry.newPool = NULL;svsEntry.oldPool = NULL; svsEntry.styleTable = NULL;
 
 	pConfig->enabled = 0;
 	pConfig->printLog = 0;
