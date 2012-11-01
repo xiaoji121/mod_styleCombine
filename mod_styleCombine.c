@@ -46,6 +46,10 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 #define DEFAULT_CONTENT_LEN (1024 << 8) //262144
 #define DOMAIN_COUNTS 2
 #define MAX_STYLE_TAG_LEN 2183
+//去右空格
+#define TRIM_RIGHT(p) while(isspace(*p)){ ++p; }
+//删除引号并去右空格
+#define DEL_QUOTATION_AND_TRIM(p) if('"' == *p || '\'' == *p) { ++p; } TRIM_RIGHT(p)
 
 int JS_TAG_PREFIX_LEN = 0, JS_TAG_SUFFIX_LEN = 0;
 int JS_TAG_EXT_PREFIX_LEN = 0, JS_TAG_EXT_SUFFIX_LEN = 0;
@@ -252,7 +256,7 @@ static int stringAppend(apr_pool_t *pool, buffer *buf, char *str, int strLen) {
 	if(buf->used + strLen >= buf->size) {
 		char *data = buf->ptr;
 		if(!prepare_buffer_size(pool, buf, buf->size + (strLen + BUFFER_PIECE_SIZE))) {
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, server, "realloc error [%s]===[%ld]", str, buf->size);
+			ap_log_error(APLOG_MARK, APLOG_ERR, 0, server, "realloc error[%d] [%s]===[%ld]", getpid(),str, buf->size);
 			return 0;
 		}
 		memcpy(buf->ptr, data, buf->used);
@@ -489,12 +493,7 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 				if(0 == memcmp(++tmpMaxTagBuf, "os=", 3)) {
 					int *posLen = (int *) 0;
 					tmpMaxTagBuf += 3;
-					if('"' == *tmpMaxTagBuf || '\'' == *tmpMaxTagBuf) {
-						++tmpMaxTagBuf;
-					}
-					while(isspace(*tmpMaxTagBuf)) {
-						++tmpMaxTagBuf;
-					}
+					DEL_QUOTATION_AND_TRIM(tmpMaxTagBuf);
 					position = strToPosition((tmpMaxTagBuf), &posLen);
 					tmpMaxTagBuf += (int) posLen;
 				}
@@ -502,12 +501,7 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 			case 'a':
 				if(0 == memcmp(++tmpMaxTagBuf, "sync=", 5)) {
 					tmpMaxTagBuf += 5;
-					if('"' == *tmpMaxTagBuf || '\'' == *tmpMaxTagBuf) {
-						++tmpMaxTagBuf;
-					}
-					while(isspace(*tmpMaxTagBuf)) {
-						++tmpMaxTagBuf;
-					}
+					DEL_QUOTATION_AND_TRIM(tmpMaxTagBuf);
 					if(0 == memcmp(tmpMaxTagBuf, "true", 4)) {
 						styleField->async = 1;
 						tmpMaxTagBuf += 4;
@@ -518,12 +512,7 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 				if(0 == memcmp(++tmpMaxTagBuf, "roup=", 5)) {
 					groupLen = 0, stop = 0;
 					tmpMaxTagBuf += 5;
-					if('"' == *tmpMaxTagBuf || '\'' == *tmpMaxTagBuf) {
-						++tmpMaxTagBuf;
-					}
-					while(isspace(*tmpMaxTagBuf)) {
-						++tmpMaxTagBuf;
-					}
+					DEL_QUOTATION_AND_TRIM(tmpMaxTagBuf);
 					char *s = tmpMaxTagBuf;
 					while(*s) {
 						switch(*s) {
@@ -948,7 +937,7 @@ static inline char *strSearch(const char *str1, int **matchedType, int **isExpre
 					r = memcmp("ink", ++s1, 3);
 					*matchedType = (int *) 0; //css
 					break;
-				case '!':
+				case '!': //process:<!--[if IE]> <!--[if IE 5.5]>
 					if (0 == memcmp("--", ++s1, 2)) {
 						if ('[' == *(s1 + 2)) {
 							cp += 12; //skip "<!--[if IE]>"
@@ -1070,9 +1059,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 			 * 如果没有结束符，将不进行处理.
 			 */
 			//clean \r\n \n \t & empty char
-			while(isspace(*curPoint)) {
-				++curPoint;
-			}
+			TRIM_RIGHT(curPoint);
 			if (memcmp(ptag->closeTag->ptr, curPoint, ptag->closeTag->used) != 0) {
 				//找不到结束的</script>
 				stringAppend(r->pool, destBuf, maxTagBuf, k);
@@ -1168,9 +1155,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 			apr_hash_set(styleMap, styleField->group->ptr, styleField->group->used, styleList);
 		}
 		//clean \r\n \n \t & empty char
-		while(isspace(*curPoint)) {
-			++curPoint;
-		}
+		TRIM_RIGHT(curPoint);
 		subHtml = curPoint;
 	}
 	if(isProcessed) {
