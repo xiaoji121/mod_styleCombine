@@ -1077,6 +1077,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 			subHtml = curPoint;
 			continue;
 		}
+		isProcessed = 1;
 		tagConfig->domain = pConfig->newDomains[styleField->domainIndex];
 		tagConfig->styleUri = styleField->styleUri;
 		tagConfig->async = styleField->async;
@@ -1096,7 +1097,6 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 			subHtml = curPoint;
 			continue;
 		}
-		isProcessed = 1;
 		//拿uri去获取版本号
 		buffer *nversion = getStrVersion(r, styleField->styleUri, pConfig);
 		styleField->version = nversion;
