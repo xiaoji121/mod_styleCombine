@@ -63,7 +63,7 @@ enum PositionEnum{TOP, HEAD, FOOTER, NONE};
 const char matches[] = {"</body>"};
 int styleTableSize = 40000;
 
-__time_t      prevTime = 0;
+__time_t      prevTime   = 0;
 char         *appRunMode = NULL;
 server_rec   *server;
 
@@ -92,7 +92,7 @@ struct ListNode {
     const void *value;
 };
 typedef struct {
-	unsigned int          size;
+	int                   size;
 	ListNode             *first;
 	ListNode             *head;
 } LinkedList;
@@ -112,20 +112,20 @@ typedef struct {
 } CombineConfig;
 
 typedef struct {
-	unsigned int        debugMode;
+	int                 debugMode;
 	buffer             *buf;
     apr_bucket_brigade *pbbOut;
 } CombineCtx;
 
 typedef struct {
 	buffer               *styleUri;
-	unsigned int          async;
+	int                   async;
 	buffer               *group;
 	enum PositionEnum     position;
 	buffer               *version;
-	unsigned int          styleType;
-	unsigned int          domainIndex;
-	unsigned int          isCombined;
+	int                   styleType;
+	int                   domainIndex;
+	int          		  isCombined;
 } StyleField;
 
 typedef struct {
@@ -134,9 +134,10 @@ typedef struct {
 	buffer          *version;
 	buffer          *group;
 	off_t            async;
-	unsigned int     isNewLine;
-	unsigned int     styleType;
-	unsigned int     needExt;
+	int              isNewLine;
+	int              styleType;
+	int              needExt;
+	int              debugMode;
 	request_rec     *r;
 } TagConfig;
 
@@ -552,6 +553,7 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 	styleField->position = position;
 	styleField->styleUri = styleUri;
 	if(NONE == position && NULL == group) {
+		styleField->async = 0;
 		return styleField;
 	}
 	char g;
@@ -614,9 +616,18 @@ static void addExtStyle(buffer *destBuf, TagConfig *tagConfig) {
 	//append the version ext
 	if (tagConfig->styleType) {
 		stringAppend(tagConfig->r->pool, destBuf, EXT_JS, 3);
-		stringAppend(tagConfig->r->pool, destBuf, JS_TAG_EXT_SUFFIX_TXT, JS_TAG_EXT_SUFFIX_LEN);
 	} else {
 		stringAppend(tagConfig->r->pool, destBuf, EXT_CSS, 4);
+	}
+	if(2 == tagConfig->debugMode) {
+		if(tagConfig->group) {
+			stringAppend(tagConfig->r->pool, destBuf, "\" group=\"", 9);
+			stringAppend(tagConfig->r->pool, destBuf, tagConfig->group->ptr, tagConfig->group->used);
+		}
+	}
+	if (tagConfig->styleType) {
+		stringAppend(tagConfig->r->pool, destBuf, JS_TAG_EXT_SUFFIX_TXT, JS_TAG_EXT_SUFFIX_LEN);
+	} else {
 		stringAppend(tagConfig->r->pool, destBuf, CSS_SUFFIX_TXT, CSS_SUFFIX_LEN);
 	}
 	return;
@@ -646,7 +657,8 @@ static void combineStyles(CombineConfig *pConfig, TagConfig *tagConfig, LinkedLi
 	combinedBuf = combinedStyleBuf[styleField->position];
 	int count = 0;
 	tagConfig->styleType = styleField->styleType;
-	tagConfig->domain  = pConfig->newDomains[styleField->domainIndex];
+	tagConfig->domain    = pConfig->newDomains[styleField->domainIndex];
+	tagConfig->group     = styleField->group;
 	fillTagConfigParams(tagConfig, versionBuf, 1, tagConfig->styleType, 1);
 	while(NULL != node) {
 		styleField = (StyleField *) node->value;
@@ -703,7 +715,7 @@ static void combineStylesAsync(request_rec *r, CombineConfig *pConfig, StyleList
 	unsigned int i = 0, k = 0, count = 0;
 	for(i = 0; i < 2; i++) {
 		LinkedList *list = styleList->list[i];
-		if(NULL == list) {
+		if(NULL == list || !list->size) {
 			if(i) {
 				stringAppend(r->pool, headBuf, "\\\"js\\\":[]", 9); // "js":[]
 			} else {
@@ -785,14 +797,19 @@ static void combineStylesDebug(CombineConfig *pConfig, TagConfig *tagConfig, Lin
 			if(NULL == styleField) {
 				continue;
 			}
-			combinedBuf = combinedStyleBuf[styleField->position];
+			if(NONE == styleField->position || styleField->async) {
+				combinedBuf = combinedStyleBuf[FOOTER];
+			} else {
+				combinedBuf = combinedStyleBuf[styleField->position];
+			}
 			tagConfig->styleType = styleField->styleType;
-			tagConfig->domain  = pConfig->newDomains[styleField->domainIndex];
+			tagConfig->domain    = pConfig->newDomains[styleField->domainIndex];
 			fillTagConfigParams(tagConfig, NULL, 1, tagConfig->styleType, 0);
 			while(NULL != node) {
 				styleField = (StyleField *) node->value;
-				tagConfig->version = styleField->version;
+				tagConfig->version  = styleField->version;
 				tagConfig->styleUri = styleField->styleUri;
+				tagConfig->group    = styleField->group;
 				addExtStyle(combinedBuf, tagConfig);
 				node = node->next;
 			}
@@ -801,26 +818,40 @@ static void combineStylesDebug(CombineConfig *pConfig, TagConfig *tagConfig, Lin
 	}
 	return;
 }
-
+/**
+ * style去重，对于异步style去重必须是当整个页面都解析完之后再进行，因为一些异步的js写在页面开始的地方.
+ * 页面实际页面上非异步的style还没有解析到，导致无法与页面上的style去重效果
+ *
+ * key的生成策略，
+ * 非异步为：域名下标+URI
+ * 异步为：域名下标+URI+组名
+ */
 static int isRepeat(request_rec *r, apr_hash_t *duplicats, StyleField *styleField) {
 	if(NULL == duplicats) {
 		return 0;
 	}
+	int len = styleField->styleUri->used;
 	//make a key
-	char *key = (char *) apr_palloc(r->pool, styleField->styleUri->used + 2);
+	buffer *key = buffer_init_size(r->pool, len + 26);
 	if(NULL == key) {
 		return 0;
 	}
-	off_t keylen = 0;
 	//add domain area
-	key[keylen++] = '0' + styleField->domainIndex;
-	memcpy((key + keylen), styleField->styleUri->ptr, styleField->styleUri->used);
-	key[keylen += styleField->styleUri->used] = ZERO_END;
-	if(NULL != apr_hash_get(duplicats, key, keylen)) {
+	key->ptr[key->used++] = '0' + styleField->domainIndex;
+	stringAppend(r->pool, key, styleField->styleUri->ptr, styleField->styleUri->used);
+	if(NULL != apr_hash_get(duplicats, key->ptr, key->used)) {
 		//if uri has exsit then skiping it
 		return 1;
 	}
-	apr_hash_set(duplicats, key, keylen, "1");
+	if(styleField->async) {
+		//add group area
+		stringAppend(r->pool, key, styleField->group->ptr, styleField->group->used);
+		if(NULL != apr_hash_get(duplicats, key->ptr, key->used)) {
+			//if uri has exsit then skiping it
+			return 1;
+		}
+	}
+	apr_hash_set(duplicats, key->ptr, key->used, "1");
 	return 0;
 }
 
@@ -1173,9 +1204,9 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 			node = asyncList->first;
 			while(NULL != node) {
 				StyleList *styleList = (StyleList *) node->value;
-				for(i = 0; i < 2; i++) {
-					LinkedList *list = styleList->list[i];
-					if(NULL == list) {
+				for(k = 0; k < 2; k++) {
+					LinkedList *list = styleList->list[k];
+					if(NULL == list || !list->size) {
 						continue;
 					}
 					ListNode *parentNode = NULL;
@@ -1258,6 +1289,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 			}
 		} else if(2 == ctx->debugMode){
 			//debug mode 2
+			tagConfig->debugMode = ctx->debugMode;
 			combineStylesDebug(pConfig, tagConfig, syncGroupList, combinedStyleBuf);
 			for(i = 0; i < DOMAIN_COUNTS; i++) {
 				LinkedList *asyncList = asyncGroups[i];
@@ -1487,19 +1519,18 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 	 * 3add debugMode
 	 * 本次请求禁用此模块，用于开发调试使用
 	 */
-	int debugMode = 0;
+	int           debugMode  = 0;
 	if(NULL != r->parsed_uri.query) {
 		char *debugModeParam = strstr(r->parsed_uri.query, DEBUG_MODE);
-		if(NULL != debugModeParam) {
-			debugModeParam += DEBUG_MODE_LEN;
-			if(*debugModeParam == '1') {
-				debugMode = 1;
-				return ap_pass_brigade(f->next, pbbIn);
-			}
-			if(*debugModeParam == '2') {
-				debugMode = 2;
+		if(NULL != debugModeParam && ZERO_END != *(debugModeParam += DEBUG_MODE_LEN)) {
+			debugMode = atoi(&(*debugModeParam));
+			if(debugMode > 2 || debugMode < 0) {
+				debugMode = 0;
 			}
 		}
+	}
+	if(debugMode == 1) {
+		return ap_pass_brigade(f->next, pbbIn);
 	}
 	if (NULL == ctx) {
 		ctx = f->ctx = apr_palloc(r->pool, sizeof(*ctx));
