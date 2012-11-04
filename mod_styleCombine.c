@@ -1037,7 +1037,16 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 	if(NULL == tagConfig) {
 		return 0;
 	}
-	tagConfig->r = r;
+	tagConfig->r         = r;
+	tagConfig->async     = 0;
+	tagConfig->debugMode = 0;
+	tagConfig->domain    = NULL;
+	tagConfig->group     = NULL;
+	tagConfig->isNewLine = 0;
+	tagConfig->needExt   = 0;
+	tagConfig->styleType = 0;
+	tagConfig->styleUri  = NULL;
+	tagConfig->version   = NULL;
 	LinkedList *syncGroupList = linked_list_create(r->pool);
 	LinkedList *asyncGroups[DOMAIN_COUNTS];
 	apr_hash_t *domains[DOMAIN_COUNTS];
