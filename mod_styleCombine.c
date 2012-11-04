@@ -1364,7 +1364,7 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 	pConfig->filterCntType = NULL;
 	pConfig->appName = "modCombine";
 
-	char *variableNames = "_async_style_url_0;_async_style_url_1;";
+	char *variableNames = "styleDomain0;styleDomain1;";
 	stringSplit(p, DOMAIN_COUNTS, pConfig->asyncVariableNames, variableNames, ';');
 
 	pConfig->blackList = linked_list_create(p);
