@@ -286,6 +286,7 @@ static void formatParser(apr_table_t *table, char *str, server_rec *server) {
 	char *srcStr = str;
 	char *strLine = NULL;
 	while (NULL != (strLine = strsep(&srcStr, "\n"))) {
+		name = NULL, value = NULL;
 		name = strsep(&strLine, "=");
 		if (NULL == name || strlen(name) <= 1) {
 			continue;
@@ -297,6 +298,7 @@ static void formatParser(apr_table_t *table, char *str, server_rec *server) {
 			continue;
 		}
 		apr_table_set(table, name, value);
+		strLine = NULL;
 	}
 	return;
 }
@@ -310,8 +312,10 @@ buffer *getStrVersion(request_rec *r, buffer *styleUri, CombineConfig *pConfig){
 	const char *strVersion = NULL;
 	if(NULL != svsEntry.styleTable) {
 		strVersion = apr_table_get(svsEntry.styleTable, styleUri->ptr);
-		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
+		if(NULL == strVersion) {
+			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
 						"==can't getVersion:ReqURI:[%s]==>StyleURI:[%s]", r->unparsed_uri, styleUri->ptr);
+		}
 	}
 	if(NULL == strVersion) {
 		time_t tv;
@@ -903,6 +907,9 @@ static void stringSplit(apr_pool_t *pool, int arrayLen, buffer *arrays[], char *
 	int i = 0;
 	char *ts = string;
 	for(i = 0; i < arrayLen; i++) {
+		if(NULL == ts) {
+			continue;
+		}
 		char *domain = strchr(ts, seperator);
 		buffer *buf = buffer_init_size(pool, 64);
 		if(NULL == buf) {
