@@ -48,20 +48,67 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 #define MAX_STYLE_TAG_LEN 2183
 //去右空格
 #define TRIM_RIGHT(p) while(isspace(*p)){ ++p; }
-//删除引号并去右空格
-#define DEL_QUOTATION_AND_TRIM(p) if('"' == *p || '\'' == *p) { ++p; } TRIM_RIGHT(p)
 
-int JS_TAG_PREFIX_LEN = 0, JS_TAG_SUFFIX_LEN = 0;
+#define BUFFER_CLEAN(buffer) if(NULL != buffer) { buffer->used = 0; buffer->ptr[0] = ZERO_END; }
+
+//解析field属性的值，有空格则去空格
+#define FIELD_PARSE(p, ret) {\
+	while(isspace(*p)){ ++p; }\
+	if('=' == *p++) {\
+		if('"' == *p || '\'' == *p) { ++p; } \
+		while(isspace(*p)){ ++p; }\
+	} else { ret = -1; } \
+}
+
+// clean .js  and .css ext
+#define CLEAN_EXT(styleField) {\
+	if(styleField->styleType) {\
+		styleField->styleUri->used -= 3;\
+	} else {\
+		styleField->styleUri->used -= 4;\
+	}\
+}
+
+//字符串拼接
+#define STRING_APPEND(pool, buf, str, strLen) {\
+	int appenStat = 0;\
+	if(NULL == buf || NULL == str || strLen <= 0) { appenStat = -1; }\
+	if(0 == buf->size) { appenStat = -1; }\
+	if(-1 != appenStat) {\
+		if(buf->used + strLen >= buf->size) {\
+			char *data = buf->ptr;\
+			if(!prepare_buffer_size(pool, buf, buf->size + (strLen + BUFFER_PIECE_SIZE))) {\
+				ap_log_error(APLOG_MARK, APLOG_ERR, 0, server, "realloc error[%d] [%s]===[%ld]", getpid(),str, buf->size);\
+				appenStat = -1;\
+			}\
+			if(-1 != appenStat) { memcpy(buf->ptr, data, buf->used); }\
+		}\
+		if(-1 != appenStat) {\
+			memcpy(buf->ptr + buf->used, str, strLen);\
+			buf->used += strLen;\
+			buf->ptr[buf->used] = ZERO_END;\
+		}\
+	}\
+}
+
+#define INIT_TAG_CONFIG(tagConfig, nVersion, haveNewLine, sType, haveExt) {\
+	tagConfig->version = nVersion;\
+	tagConfig->isNewLine = haveNewLine;\
+	tagConfig->styleType = sType;\
+	tagConfig->needExt = haveExt;\
+}
+
+int JS_TAG_PREFIX_LEN     = 0, JS_TAG_SUFFIX_LEN     = 0;
 int JS_TAG_EXT_PREFIX_LEN = 0, JS_TAG_EXT_SUFFIX_LEN = 0;
-int CSS_PREFIX_LEN = 0, CSS_SUFFIX_LEN = 0;
-int DEBUG_MODE_LEN = 12;
+int CSS_PREFIX_LEN        = 0, CSS_SUFFIX_LEN        = 0;
+int DEBUG_MODE_LEN        = 12;
 
 /***********global variable************/
-const char ZERO_END = '\0';
+const char ZERO_END       = '\0';
 /*position char */
-enum PositionEnum{TOP, HEAD, FOOTER, NONE};
-const char matches[] = {"</body>"};
-int styleTableSize = 40000;
+enum PositionEnum { TOP, HEAD, FOOTER, NONE };
+const char matches[]      = {"</body>"};
+int styleTableSize        = 40000;
 
 __time_t      prevTime   = 0;
 char         *appRunMode = NULL;
@@ -156,14 +203,6 @@ typedef struct {
 
 StyleVersionEntry svsEntry;
 
-void fillTagConfigParams(TagConfig *tagConfig, buffer *version,
-		int isNewLine, int styleType, int needExt) {
-	tagConfig->version = version;
-	tagConfig->isNewLine = isNewLine;
-	tagConfig->styleType = styleType;
-	tagConfig->needExt = needExt;
-}
-
 LinkedList *linked_list_create(apr_pool_t *pool) {
 	LinkedList *list = (LinkedList *) apr_palloc(pool, sizeof(LinkedList));
 	if(NULL == list) {
@@ -218,14 +257,6 @@ int prepare_buffer_size(apr_pool_t *pool, buffer *buf, size_t in_size) {
 	return size;
 }
 
-void buffer_clean(buffer *buf) {
-	if(NULL == buf) {
-		return;
-	}
-	buf->used = 0;
-	buf->ptr[0]=ZERO_END;
-}
-
 int add(apr_pool_t *pool, LinkedList *list, void *item) {
 	if (NULL == list || NULL == item) {
 		return 0;
@@ -244,27 +275,6 @@ int add(apr_pool_t *pool, LinkedList *list, void *item) {
 	}
 	++list->size;
 	list->head = node;
-	return 1;
-}
-
-static int stringAppend(apr_pool_t *pool, buffer *buf, char *str, int strLen) {
-	if(NULL == buf || NULL == str || strLen <= 0) {
-		return 0;
-	}
-	if(0 == buf->size) {
-		return 0;
-	}
-	if(buf->used + strLen >= buf->size) {
-		char *data = buf->ptr;
-		if(!prepare_buffer_size(pool, buf, buf->size + (strLen + BUFFER_PIECE_SIZE))) {
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, server, "realloc error[%d] [%s]===[%ld]", getpid(),str, buf->size);
-			return 0;
-		}
-		memcpy(buf->ptr, data, buf->used);
-	}
-	memcpy(buf->ptr + buf->used, str, strLen);
-	buf->used += strLen;
-	buf->ptr[buf->used] = ZERO_END;
 	return 1;
 }
 
@@ -307,11 +317,11 @@ buffer *getStrVersion(request_rec *r, buffer *styleUri, CombineConfig *pConfig){
 		time_t tv;
 		time(&tv);
 		//build a dynic version in 6 minutes
-		snprintf(buf->ptr, buf->size, "%ld", (tv / 300));
+		apr_snprintf(buf->ptr, buf->size, "%ld", (tv / 300));
 		buf->used = strlen(buf->ptr);
 		return buf;
 	}
-	stringAppend(r->pool, buf, (char *) strVersion, strlen(strVersion));
+	STRING_APPEND(r->pool, buf, (char *) strVersion, strlen(strVersion));
 	return buf;
 }
 
@@ -479,6 +489,7 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 		return NULL;
 	}
 	// get pos & async & group
+	char *fieldParser = NULL;
 	buffer *group = NULL;
 	char *urlStart = currURL - ptag->refTag->used - 1; // -1 == ' '
 	enum PositionEnum position = NONE;
@@ -488,32 +499,47 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 			tmpMaxTagBuf += (styleUri->used + ptag->refTag->used + domain->used) + 2; // 2 == \"\"
 		}
 		if(isspace(*tmpMaxTagBuf)) {
-			++tmpMaxTagBuf;
-			switch(*tmpMaxTagBuf) {
+			fieldParser = tmpMaxTagBuf;
+			fieldParser++;
+			switch(*fieldParser) {
 			case 'p':
-				if(0 == memcmp(++tmpMaxTagBuf, "os=", 3)) {
+				if(0 == memcmp(++fieldParser, "os", 2)) {
+					tmpMaxTagBuf += 4; // pos
+					int ret = 0;
+					FIELD_PARSE(tmpMaxTagBuf, ret);
+					if(ret == -1) {
+						continue;
+					}
 					int *posLen = (int *) 0;
-					tmpMaxTagBuf += 3;
-					DEL_QUOTATION_AND_TRIM(tmpMaxTagBuf);
 					position = strToPosition((tmpMaxTagBuf), &posLen);
 					tmpMaxTagBuf += (int) posLen;
+					continue;
 				}
 				break;
 			case 'a':
-				if(0 == memcmp(++tmpMaxTagBuf, "sync=", 5)) {
-					tmpMaxTagBuf += 5;
-					DEL_QUOTATION_AND_TRIM(tmpMaxTagBuf);
+				if(0 == memcmp(++fieldParser, "sync", 4)) {
+					tmpMaxTagBuf += 6; // async
+					int ret = 0;
+					FIELD_PARSE(tmpMaxTagBuf, ret);
+					if(ret == -1) {
+						continue;
+					}
 					if(0 == memcmp(tmpMaxTagBuf, "true", 4)) {
 						styleField->async = 1;
 						tmpMaxTagBuf += 4;
+						continue;
 					}
 				}
 				break;
 			case 'g':
-				if(0 == memcmp(++tmpMaxTagBuf, "roup=", 5)) {
+				if(0 == memcmp(++fieldParser, "roup", 4)) {
+					tmpMaxTagBuf += 6;// group
+					int ret = 0;
+					FIELD_PARSE(tmpMaxTagBuf, ret);
+					if(ret == -1) {
+						continue;
+					}
 					groupLen = 0, stop = 0;
-					tmpMaxTagBuf += 5;
-					DEL_QUOTATION_AND_TRIM(tmpMaxTagBuf);
 					char *s = tmpMaxTagBuf;
 					while(*s) {
 						switch(*s) {
@@ -535,32 +561,44 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 					}
 					if(groupLen) {
 						group = buffer_init_size(r->pool, groupLen + 8);
-						stringAppend(r->pool, group, tmpMaxTagBuf, groupLen);
+						STRING_APPEND(r->pool, group, tmpMaxTagBuf, groupLen);
 						tmpMaxTagBuf += groupLen;
+						continue;
 					}
 				}
 				break;
-			default:
-				//处理多空格情况下的问题
-				--tmpMaxTagBuf;
-				break;
 			}
 		}
-		++tmpMaxTagBuf;
+		tmpMaxTagBuf++;
 	}
 	styleField->domainIndex = dIndex;
 	styleField->styleType = ptag->styleType;
 	styleField->position = position;
 	styleField->styleUri = styleUri;
-	if(NONE == position && NULL == group) {
-		styleField->async = 0;
-		return styleField;
+	if(NULL == group) {
+		//group和pos 都为空时，保持原地不变
+		if(NONE == position) {
+			styleField->async = 0;
+			return styleField;
+		}
+		//当只有async属性时，保证原地不变
+		if(styleField->async) {
+			styleField->async = 0;
+			styleField->position = NONE;
+			return styleField;
+		}
+	} else {
+		if(NONE == position && !styleField->async) {
+			styleField->group = NULL;
+			return styleField;
+		}
 	}
+	//pos
 	char g;
 	if(NONE != position && NULL == group) {
 		//create default group
 		group = buffer_init_size(r->pool, 24);
-		stringAppend(r->pool, group, "_def_group_name_", 16);
+		STRING_APPEND(r->pool, group, "_def_group_name_", 16);
 		g = '0' + (int) position;
 	} else {
 		g = '0' + styleField->async;
@@ -572,20 +610,20 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 }
 
 static void makeVersion(apr_pool_t *pool, buffer *buf, buffer *versionBuf) {
-	stringAppend(pool, buf, "?_v=", 4);
+	STRING_APPEND(pool, buf, "?_v=", 4);
 	if(NULL != versionBuf) {
 		if(versionBuf->used > 32) {
 			int i = 0;
 			char md5[3];
 			unsigned char digest[16];
 			apr_md5(digest, (const void *)versionBuf->ptr, versionBuf->used);
-			buffer_clean(versionBuf);
+			BUFFER_CLEAN(versionBuf);
 			for(i = 0; i < 16; i++) {
-				snprintf(md5, 3, "%02x", digest[i]);
-				stringAppend(pool, versionBuf, md5, 2);
+				apr_snprintf(md5, 3, "%02x", digest[i]);
+				STRING_APPEND(pool, versionBuf, md5, 2);
 			}
 		}
-		stringAppend(pool, buf, versionBuf->ptr, versionBuf->used);
+		STRING_APPEND(pool, buf, versionBuf->ptr, versionBuf->used);
 	}
 }
 
@@ -594,52 +632,45 @@ static void addExtStyle(buffer *destBuf, TagConfig *tagConfig) {
 		return;
 	}
 	if (tagConfig->isNewLine) {
-		stringAppend(tagConfig->r->pool, destBuf, "\n", 1);
+		STRING_APPEND(tagConfig->r->pool, destBuf, "\n", 1);
 	}
 	if (tagConfig->styleType) {
-		stringAppend(tagConfig->r->pool, destBuf, JS_TAG_EXT_PREFIX_TXT, JS_TAG_EXT_PREFIX_LEN);
+		STRING_APPEND(tagConfig->r->pool, destBuf, JS_TAG_EXT_PREFIX_TXT, JS_TAG_EXT_PREFIX_LEN);
 	} else {
-		stringAppend(tagConfig->r->pool, destBuf, CSS_PREFIX_TXT, CSS_PREFIX_LEN);
+		STRING_APPEND(tagConfig->r->pool, destBuf, CSS_PREFIX_TXT, CSS_PREFIX_LEN);
 	}
-	stringAppend(tagConfig->r->pool, destBuf, tagConfig->domain->ptr, tagConfig->domain->used);
-	stringAppend(tagConfig->r->pool, destBuf, tagConfig->styleUri->ptr, tagConfig->styleUri->used);
+	STRING_APPEND(tagConfig->r->pool, destBuf, tagConfig->domain->ptr, tagConfig->domain->used);
+	STRING_APPEND(tagConfig->r->pool, destBuf, tagConfig->styleUri->ptr, tagConfig->styleUri->used);
 	//append ext
 	if(tagConfig->needExt) {
 		if (tagConfig->styleType) {
-			stringAppend(tagConfig->r->pool, destBuf, EXT_JS, 3);
+			STRING_APPEND(tagConfig->r->pool, destBuf, EXT_JS, 3);
 		} else {
-			stringAppend(tagConfig->r->pool, destBuf, EXT_CSS, 4);
+			STRING_APPEND(tagConfig->r->pool, destBuf, EXT_CSS, 4);
 		}
 	}
 	//append version
 	makeVersion(tagConfig->r->pool, destBuf, tagConfig->version);
 	//append the version ext
 	if (tagConfig->styleType) {
-		stringAppend(tagConfig->r->pool, destBuf, EXT_JS, 3);
+		STRING_APPEND(tagConfig->r->pool, destBuf, EXT_JS, 3);
 	} else {
-		stringAppend(tagConfig->r->pool, destBuf, EXT_CSS, 4);
+		STRING_APPEND(tagConfig->r->pool, destBuf, EXT_CSS, 4);
 	}
 	if(2 == tagConfig->debugMode) {
 		if(tagConfig->group) {
-			stringAppend(tagConfig->r->pool, destBuf, "\" group=\"", 9);
-			stringAppend(tagConfig->r->pool, destBuf, tagConfig->group->ptr, tagConfig->group->used);
+			STRING_APPEND(tagConfig->r->pool, destBuf, "\" group=\"", 9);
+			STRING_APPEND(tagConfig->r->pool, destBuf, tagConfig->group->ptr, tagConfig->group->used);
 		}
 	}
 	if (tagConfig->styleType) {
-		stringAppend(tagConfig->r->pool, destBuf, JS_TAG_EXT_SUFFIX_TXT, JS_TAG_EXT_SUFFIX_LEN);
+		STRING_APPEND(tagConfig->r->pool, destBuf, JS_TAG_EXT_SUFFIX_TXT, JS_TAG_EXT_SUFFIX_LEN);
 	} else {
-		stringAppend(tagConfig->r->pool, destBuf, CSS_SUFFIX_TXT, CSS_SUFFIX_LEN);
+		STRING_APPEND(tagConfig->r->pool, destBuf, CSS_SUFFIX_TXT, CSS_SUFFIX_LEN);
 	}
 	return;
 }
 
-static void cleanExt(StyleField *styleField) {
-	if(styleField->styleType) {
-		styleField->styleUri->used -= 3; // clean .js ext
-	} else {
-		styleField->styleUri->used -= 4; // clean .css ext
-	}
-}
 /**
  * 将js/css列表合并成一个url,并放到相应的位置上去
  */
@@ -659,11 +690,11 @@ static void combineStyles(CombineConfig *pConfig, TagConfig *tagConfig, LinkedLi
 	tagConfig->styleType = styleField->styleType;
 	tagConfig->domain    = pConfig->newDomains[styleField->domainIndex];
 	tagConfig->group     = styleField->group;
-	fillTagConfigParams(tagConfig, versionBuf, 1, tagConfig->styleType, 1);
+	INIT_TAG_CONFIG(tagConfig, versionBuf, 1, tagConfig->styleType, 1);
 	while(NULL != node) {
 		styleField = (StyleField *) node->value;
 		if (count) {
-			stringAppend(tagConfig->r->pool, tmpUriBuf, URI_SEPARATOR, 1);
+			STRING_APPEND(tagConfig->r->pool, tmpUriBuf, URI_SEPARATOR, 1);
 		} else {
 			count++;
 		}
@@ -674,12 +705,12 @@ static void combineStyles(CombineConfig *pConfig, TagConfig *tagConfig, LinkedLi
 			tmpUriBuf->ptr[--tmpUriBuf->used] = ZERO_END;
 			tagConfig->styleUri = tmpUriBuf;
 			addExtStyle(combinedBuf, tagConfig);
-			buffer_clean(versionBuf);
-			buffer_clean(tmpUriBuf);
+			BUFFER_CLEAN(versionBuf);
+			BUFFER_CLEAN(tmpUriBuf);
 		}
-		cleanExt(styleField);
-		stringAppend(tagConfig->r->pool, tmpUriBuf, styleField->styleUri->ptr, styleField->styleUri->used);
-		stringAppend(tagConfig->r->pool, versionBuf, styleField->version->ptr, styleField->version->used);
+		CLEAN_EXT(styleField);
+		STRING_APPEND(tagConfig->r->pool, tmpUriBuf, styleField->styleUri->ptr, styleField->styleUri->used);
+		STRING_APPEND(tagConfig->r->pool, versionBuf, styleField->version->ptr, styleField->version->used);
 		node = node->next;
 	}
 	tagConfig->styleUri = tmpUriBuf;
@@ -689,15 +720,15 @@ static void combineStyles(CombineConfig *pConfig, TagConfig *tagConfig, LinkedLi
 
 static void addAsyncStyle(apr_pool_t *pool, buffer *buf, buffer *versionBuf, int styleType) {
 	if (styleType) {
-		stringAppend(pool, buf, EXT_JS, 3);
+		STRING_APPEND(pool, buf, EXT_JS, 3);
 	} else {
-		stringAppend(pool, buf, EXT_CSS, 4);
+		STRING_APPEND(pool, buf, EXT_CSS, 4);
 	}
 	makeVersion(pool, buf, versionBuf);
 	if (styleType) {
-		stringAppend(pool, buf, EXT_JS, 3);
+		STRING_APPEND(pool, buf, EXT_JS, 3);
 	} else {
-		stringAppend(pool, buf, EXT_CSS, 4);
+		STRING_APPEND(pool, buf, EXT_CSS, 4);
 	}
 }
 
@@ -710,33 +741,33 @@ static void combineStylesAsync(request_rec *r, CombineConfig *pConfig, StyleList
 	buffer *headBuf = combinedStyleBuf[HEAD];
 	headBuf->ptr[headBuf->used++] = '\\';
 	headBuf->ptr[headBuf->used++] = '"';
-	stringAppend(r->pool, headBuf, styleList->group->ptr, styleList->group->used - 1);
-	stringAppend(r->pool, headBuf, "\\\":{\\\"css\\\"", 11);
+	STRING_APPEND(r->pool, headBuf, styleList->group->ptr, styleList->group->used - 1);
+	STRING_APPEND(r->pool, headBuf, "\\\":{\\\"css\\\"", 11);
 	unsigned int i = 0, k = 0, count = 0;
 	for(i = 0; i < 2; i++) {
 		LinkedList *list = styleList->list[i];
 		if(NULL == list || !list->size) {
 			if(i) {
-				stringAppend(r->pool, headBuf, "\\\"js\\\":[]", 9); // "js":[]
+				STRING_APPEND(r->pool, headBuf, "\\\"js\\\":[]", 9); // "js":[]
 			} else {
-				stringAppend(r->pool, headBuf, ":[],", 4); // "css":[],
+				STRING_APPEND(r->pool, headBuf, ":[],", 4); // "css":[],
 			}
 			continue;
 		}
 		if(i) {
-			stringAppend(r->pool, headBuf, "\\\"js\\\"", 6);
+			STRING_APPEND(r->pool, headBuf, "\\\"js\\\"", 6);
 		}
-		buffer_clean(tmpUriBuf);
-		buffer_clean(versionBuf);
-		stringAppend(r->pool, headBuf, ":[", 2);
+		BUFFER_CLEAN(tmpUriBuf);
+		BUFFER_CLEAN(versionBuf);
+		STRING_APPEND(r->pool, headBuf, ":[", 2);
 		ListNode *node = list->first;
 		StyleField *styleField = (StyleField *) node->value;
 		buffer *domain = pConfig->newDomains[styleField->domainIndex];
-		stringAppend(r->pool, tmpUriBuf, domain->ptr, domain->used);
+		STRING_APPEND(r->pool, tmpUriBuf, domain->ptr, domain->used);
 		for(k = 0, count = 0; NULL != node; k++, count++) {
 			styleField = (StyleField *) node->value;
 			if(k != 0) {
-				stringAppend(r->pool, tmpUriBuf, URI_SEPARATOR, 1);
+				STRING_APPEND(r->pool, tmpUriBuf, URI_SEPARATOR, 1);
 			}
 			//url拼接在一起的长度超过配置的长度，则需要分成多个请求来处理。(域名+uri+下一个uri +版本长度 + 参数名称长度[版本长度36 + 参数名称长度4])
 			int urlLen = (domain->used + tmpUriBuf->used + styleField->styleUri->used);
@@ -745,34 +776,34 @@ static void combineStylesAsync(request_rec *r, CombineConfig *pConfig, StyleList
 				tmpUriBuf->ptr[--tmpUriBuf->used] = ZERO_END;
 				addAsyncStyle(r->pool, tmpUriBuf, versionBuf, i);
 				//copy to head
-				stringAppend(r->pool, headBuf, "\\\"", 2);
-				stringAppend(r->pool, headBuf, tmpUriBuf->ptr, tmpUriBuf->used);
-				buffer_clean(tmpUriBuf);
-				buffer_clean(versionBuf);
+				STRING_APPEND(r->pool, headBuf, "\\\"", 2);
+				STRING_APPEND(r->pool, headBuf, tmpUriBuf->ptr, tmpUriBuf->used);
+				BUFFER_CLEAN(tmpUriBuf);
+				BUFFER_CLEAN(versionBuf);
 				//if not the end
 				if(list->size >= count + 1) {
-					stringAppend(r->pool, headBuf, "\\\",", 3);
-					stringAppend(r->pool, tmpUriBuf, domain->ptr, domain->used);
+					STRING_APPEND(r->pool, headBuf, "\\\",", 3);
+					STRING_APPEND(r->pool, tmpUriBuf, domain->ptr, domain->used);
 					k = -1;
 				}
 			}
-			cleanExt(styleField);
-			stringAppend(r->pool, tmpUriBuf, styleField->styleUri->ptr, styleField->styleUri->used);
-			stringAppend(r->pool, versionBuf, styleField->version->ptr, styleField->version->used);
+			CLEAN_EXT(styleField);
+			STRING_APPEND(r->pool, tmpUriBuf, styleField->styleUri->ptr, styleField->styleUri->used);
+			STRING_APPEND(r->pool, versionBuf, styleField->version->ptr, styleField->version->used);
 			node = node->next;
 		}
 		if(tmpUriBuf->used) {
-			stringAppend(r->pool, headBuf, "\\\"", 2);
+			STRING_APPEND(r->pool, headBuf, "\\\"", 2);
 			addAsyncStyle(r->pool, tmpUriBuf, versionBuf, i);
 		}
-		stringAppend(r->pool, headBuf, tmpUriBuf->ptr, tmpUriBuf->used);
+		STRING_APPEND(r->pool, headBuf, tmpUriBuf->ptr, tmpUriBuf->used);
 		if (i) {
-			stringAppend(r->pool, headBuf, "\\\"]", 3);
+			STRING_APPEND(r->pool, headBuf, "\\\"]", 3);
 		} else {
-			stringAppend(r->pool, headBuf, "\\\"],", 4);
+			STRING_APPEND(r->pool, headBuf, "\\\"],", 4);
 		}
 	}
-	stringAppend(r->pool, headBuf, "},", 2);
+	STRING_APPEND(r->pool, headBuf, "},", 2);
 }
 
 /**
@@ -804,7 +835,7 @@ static void combineStylesDebug(CombineConfig *pConfig, TagConfig *tagConfig, Lin
 			}
 			tagConfig->styleType = styleField->styleType;
 			tagConfig->domain    = pConfig->newDomains[styleField->domainIndex];
-			fillTagConfigParams(tagConfig, NULL, 1, tagConfig->styleType, 0);
+			INIT_TAG_CONFIG(tagConfig, NULL, 1, tagConfig->styleType, 0);
 			while(NULL != node) {
 				styleField = (StyleField *) node->value;
 				tagConfig->version  = styleField->version;
@@ -838,14 +869,14 @@ static int isRepeat(request_rec *r, apr_hash_t *duplicats, StyleField *styleFiel
 	}
 	//add domain area
 	key->ptr[key->used++] = '0' + styleField->domainIndex;
-	stringAppend(r->pool, key, styleField->styleUri->ptr, styleField->styleUri->used);
+	STRING_APPEND(r->pool, key, styleField->styleUri->ptr, styleField->styleUri->used);
 	if(NULL != apr_hash_get(duplicats, key->ptr, key->used)) {
 		//if uri has exsit then skiping it
 		return 1;
 	}
 	if(styleField->async) {
 		//add group area
-		stringAppend(r->pool, key, styleField->group->ptr, styleField->group->used);
+		STRING_APPEND(r->pool, key, styleField->group->ptr, styleField->group->used);
 		if(NULL != apr_hash_get(duplicats, key->ptr, key->used)) {
 			//if uri has exsit then skiping it
 			return 1;
@@ -878,7 +909,7 @@ static void stringSplit(apr_pool_t *pool, int arrayLen, buffer *arrays[], char *
 			continue;
 		}
 		if(NULL != domain) {
-			stringAppend(pool, buf, ts, (domain - ts));
+			STRING_APPEND(pool, buf, ts, (domain - ts));
 			arrays[i] = buf;
 			ts = ++domain;//move char of ';'
 		} else {
@@ -887,7 +918,7 @@ static void stringSplit(apr_pool_t *pool, int arrayLen, buffer *arrays[], char *
 			}
 			int len = strlen(ts);
 			if(len > 0) {
-				stringAppend(pool, buf, ts, len);
+				STRING_APPEND(pool, buf, ts, len);
 				arrays[i] = buf;
 			}
 			break;
@@ -1063,7 +1094,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 	char *subHtml = ctx->buf->ptr;
 	while (NULL != (curPoint = strSearch(subHtml, &matchedType, &isExpression))) {
 		tmpPoint = curPoint;
-		stringAppend(r->pool, destBuf, subHtml, curPoint - subHtml);
+		STRING_APPEND(r->pool, destBuf, subHtml, curPoint - subHtml);
 		//此时表示当前是js文件，需要使用js的标签来处理
 		ptag = (1 == (int) matchedType ? jsPtag:cssPtag);
 		//1 skip&filter
@@ -1102,7 +1133,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 			TRIM_RIGHT(curPoint);
 			if (memcmp(ptag->closeTag->ptr, curPoint, ptag->closeTag->used) != 0) {
 				//找不到结束的</script>
-				stringAppend(r->pool, destBuf, maxTagBuf, k);
+				STRING_APPEND(r->pool, destBuf, maxTagBuf, k);
 				subHtml = curPoint;
 				continue;
 			}
@@ -1110,9 +1141,9 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 		}
 		StyleField *styleField = tagParser(r, pConfig, ptag, maxTagBuf, i);
 		if (NULL == styleField) {
-			stringAppend(r->pool, destBuf, maxTagBuf, k);
+			STRING_APPEND(r->pool, destBuf, maxTagBuf, k);
 			if(ptag->styleType) {
-				stringAppend(r->pool, destBuf, ptag->closeTag->ptr, ptag->closeTag->used);
+				STRING_APPEND(r->pool, destBuf, ptag->closeTag->ptr, ptag->closeTag->used);
 			}
 			subHtml = curPoint;
 			continue;
@@ -1127,7 +1158,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 			//拿uri去获取版本号
 			buffer *nversion = getStrVersion(r, styleField->styleUri, pConfig);
 			styleField->version = nversion;
-			fillTagConfigParams(tagConfig, nversion, 0, ptag->styleType, 0);
+			INIT_TAG_CONFIG(tagConfig, nversion, 0, ptag->styleType, 0);
 			addExtStyle(destBuf, tagConfig);
 			subHtml = curPoint;
 			continue;
@@ -1140,7 +1171,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 		//拿uri去获取版本号
 		buffer *nversion = getStrVersion(r, styleField->styleUri, pConfig);
 		styleField->version = nversion;
-		fillTagConfigParams(tagConfig, nversion, 0, ptag->styleType, 0);
+		INIT_TAG_CONFIG(tagConfig, nversion, 0, ptag->styleType, 0);
 		//当没有使用异步并且又没有设置位置则保持原位不动
 		if(0 == styleField->async && NONE == styleField->position) {
 			addExtStyle(destBuf, tagConfig);
@@ -1201,7 +1232,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 	if(isProcessed) {
 		//append the tail html
 		int subHtmlLen = (ctx->buf->ptr + ctx->buf->used) - subHtml;
-		stringAppend(r->pool, destBuf, subHtml, subHtmlLen);
+		STRING_APPEND(r->pool, destBuf, subHtml, subHtmlLen);
 
 		//async clean duplicates
 		ListNode *node = NULL;
@@ -1258,27 +1289,27 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 					continue;
 				}
 				if(0 == addScriptPic) {
-					stringAppend(r->pool, combinedStyleBuf[HEAD], "\n<script type=\"text/javascript\">\n", 33);
+					STRING_APPEND(r->pool, combinedStyleBuf[HEAD], "\n<script type=\"text/javascript\">\n", 33);
 				}
 				++addScriptPic;
 				//1、先合并需要异步加载的js/css
 				if(NULL != (node = asyncList->first)) {
 					StyleList *styleList = (StyleList *) node->value;
-					stringAppend(r->pool, combinedStyleBuf[HEAD], "var ", 4);
+					STRING_APPEND(r->pool, combinedStyleBuf[HEAD], "var ", 4);
 					buffer *variableName = pConfig->asyncVariableNames[styleList->domainIndex];
-					stringAppend(r->pool, combinedStyleBuf[HEAD], variableName->ptr, variableName->used);
-					stringAppend(r->pool, combinedStyleBuf[HEAD], "=\"{", 3);
+					STRING_APPEND(r->pool, combinedStyleBuf[HEAD], variableName->ptr, variableName->used);
+					STRING_APPEND(r->pool, combinedStyleBuf[HEAD], "=\"{", 3);
 					while(NULL != node) {
 						styleList = (StyleList *) node->value;
 						combineStylesAsync(r, pConfig, styleList, combinedStyleBuf, tmpUriBuf, versionBuf);
 						node = (ListNode *) node->next;
 					}
 					--combinedStyleBuf[HEAD]->used;
-					stringAppend(r->pool, combinedStyleBuf[HEAD], "}\";\n", 4);
+					STRING_APPEND(r->pool, combinedStyleBuf[HEAD], "}\";\n", 4);
 				}
 			}
 			if(addScriptPic) {
-				stringAppend(r->pool, combinedStyleBuf[HEAD], "</script>\n", 10);
+				STRING_APPEND(r->pool, combinedStyleBuf[HEAD], "</script>\n", 10);
 			}
 			//2、将外部引入的js/css进行合并
 			if(NULL != syncGroupList && NULL != (node = syncGroupList->first)) {
@@ -1289,8 +1320,8 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 						if(NULL == list) {
 							continue;
 						}
-						buffer_clean(tmpUriBuf);
-						buffer_clean(versionBuf);
+						BUFFER_CLEAN(tmpUriBuf);
+						BUFFER_CLEAN(versionBuf);
 						combineStyles(pConfig, tagConfig, list, combinedStyleBuf, tmpUriBuf, versionBuf);
 					}
 					node = (ListNode *) node->next;
@@ -1569,7 +1600,7 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 		const char *data;
 		apr_size_t len; //read len
 		apr_bucket_read(pbktIn, &data, &len, APR_BLOCK_READ);
-		stringAppend(r->pool, ctx->buf, (char *) data, len);
+		STRING_APPEND(r->pool, ctx->buf, (char *) data, len);
 		apr_bucket_delete(pbktIn);
 	}
 	if(!isEOS) {
