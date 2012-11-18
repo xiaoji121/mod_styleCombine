@@ -920,6 +920,7 @@ static void stringSplit(apr_pool_t *pool, int arrayLen, buffer *arrays[], char *
 			if(len > 0) {
 				STRING_APPEND(pool, buf, ts, len);
 				arrays[i] = buf;
+				ts += len;
 			}
 			break;
 		}
@@ -1402,7 +1403,12 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 	pConfig->enabled = 0;
 	pConfig->printLog = 0;
 	pConfig->filterCntType = NULL;
-	pConfig->appName = "modCombine";
+	pConfig->appName = NULL;
+	int i = 0;
+	for(i = 0; i < DOMAIN_COUNTS; i++) {
+		pConfig->oldDomains[i] = NULL;
+		pConfig->newDomains[i] = NULL;
+	}
 
 	char *variableNames = "styleDomain0;styleDomain1;";
 	stringSplit(p, DOMAIN_COUNTS, pConfig->asyncVariableNames, variableNames, ';');
