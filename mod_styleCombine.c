@@ -110,8 +110,8 @@ enum PositionEnum { TOP, HEAD, FOOTER, NONE };
 const char matches[]      = {"</body>"};
 int styleTableSize        = 40000;
 
-__time_t      prevTime   = 0;
-char         *appRunMode = NULL;
+__time_t      prevTime    = 0;
+char         *appRunMode  = NULL;
 server_rec   *server;
 
 typedef struct {
@@ -1068,7 +1068,7 @@ static inline char *strSearch(const char *str1, int **matchedType, int **isExpre
 }
 
 static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBuf, CombineConfig *pConfig, CombineCtx *ctx) {
-	char *maxTagBuf = (char *) apr_palloc(r->pool, MAX_STYLE_TAG_LEN);
+	char *maxTagBuf      = (char *) apr_palloc(r->pool, MAX_STYLE_TAG_LEN);
 	if(NULL == maxTagBuf) {
 		return 0;
 	}
@@ -1081,20 +1081,17 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 	tagConfig->debugMode = 0;
 	tagConfig->domain    = NULL;
 	tagConfig->group     = NULL;
-	tagConfig->isNewLine = 0;
-	tagConfig->needExt   = 0;
-	tagConfig->styleType = 0;
 	tagConfig->styleUri  = NULL;
-	tagConfig->version   = NULL;
-	LinkedList *syncGroupList = linked_list_create(r->pool);
+	INIT_TAG_CONFIG(tagConfig, NULL, 0, 0, 0);
 	LinkedList *asyncGroups[DOMAIN_COUNTS];
 	apr_hash_t *domains[DOMAIN_COUNTS];
-	apr_hash_t *duplicates = apr_hash_make(r->pool);
-	int maxTagSize = MAX_STYLE_TAG_LEN - 10;
-	int *matchedType = 0, *isExpression = 0;
-	register int  i = 0, k = 0, isProcessed = 0,combinBufSize = 100;
-	register ParserTag *ptag = NULL;
-	register char *curPoint = NULL, *tmpPoint = NULL;
+	LinkedList *syncGroupList                  = linked_list_create(r->pool);
+	apr_hash_t *duplicates                     = apr_hash_make(r->pool);
+	int maxTagSize                             = MAX_STYLE_TAG_LEN - 10;
+	register ParserTag *ptag                   = NULL;
+	int           *matchedType = 0, *isExpression = 0;
+	register char *curPoint    = NULL, *tmpPoint  = NULL;
+	register int   i = 0, k = 0, isProcessed = 0, combinBufSize = 100;
 	for(i = 0; i < DOMAIN_COUNTS; i++) {
 		domains[i] = NULL;
 		asyncGroups[i] = NULL;
@@ -1405,7 +1402,7 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 
 	CSS_PREFIX_LEN = strlen(CSS_PREFIX_TXT);
 	CSS_SUFFIX_LEN = strlen(CSS_SUFFIX_TXT);
-	svsEntry.mtime = 0; svsEntry.newPool = NULL;svsEntry.oldPool = NULL; svsEntry.styleTable = NULL;
+	svsEntry.mtime = 0; svsEntry.newPool = NULL; svsEntry.oldPool = NULL; svsEntry.styleTable = NULL;
 
 	pConfig->enabled = 0;
 	pConfig->printLog = 0;
@@ -1619,7 +1616,7 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 	if(!isEOS) {
 		return OK;
 	}
-	struct timeval start;
+	struct timeval start, end;
 	if(9 == pConfig->printLog) {
 		gettimeofday(&start, NULL);
 	}
@@ -1652,10 +1649,9 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 	apr_brigade_cleanup(pbbIn);
 
 	if(9 == pConfig->printLog) {
-		struct timeval end;
 		gettimeofday(&end, NULL);
-		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "===end process: URI[%s]==start[%ld]==end[%ld]==Result[%ld]",
-				r->uri, start.tv_usec, end.tv_usec, end.tv_usec - start.tv_usec);
+		int usedtime = 1000000 * ( end.tv_sec - start.tv_sec ) + end.tv_usec - start.tv_usec;
+		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "===end processed: URI[%s]==Result[%d us]", r->uri, usedtime);
 	}
 	return ap_pass_brigade(f->next, ctx->pbbOut);
 }
