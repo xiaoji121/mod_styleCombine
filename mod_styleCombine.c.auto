@@ -308,7 +308,6 @@ buffer *getStrVersion(request_rec *r, buffer *styleUri, CombineConfig *pConfig){
 	if(NULL == buf) {
 		return NULL;
 	}
-	void *data;
 	const char *strVersion = NULL;
 	if(NULL != svsEntry.styleTable) {
 		strVersion = apr_table_get(svsEntry.styleTable, styleUri->ptr);
