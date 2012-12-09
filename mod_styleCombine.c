@@ -308,7 +308,6 @@ buffer *getStrVersion(request_rec *r, buffer *styleUri, CombineConfig *pConfig){
 	if(NULL == buf) {
 		return NULL;
 	}
-	void *data;
 	const char *strVersion = NULL;
 	if(NULL != svsEntry.styleTable) {
 		strVersion = apr_table_get(svsEntry.styleTable, styleUri->ptr);
@@ -1583,6 +1582,10 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 		return ap_pass_brigade(f->next, pbbIn);
 	}
 	if (NULL == ctx) {
+		apr_allocator_t *alt = apr_pool_allocator_get(r->pool);
+		if(NULL != alt) {
+			apr_allocator_max_free_set(alt, 10240);
+		}
 		ctx = f->ctx = apr_palloc(r->pool, sizeof(*ctx));
 		if(NULL == ctx) {
 			return ap_pass_brigade(f->next, pbbIn);
