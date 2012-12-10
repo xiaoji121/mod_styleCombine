@@ -786,7 +786,7 @@ static void combineStylesAsync(request_rec *r, CombineConfig *pConfig, StyleList
 				if(list->size >= count + 1) {
 					STRING_APPEND(r->pool, headBuf, "\",", 2);
 					STRING_APPEND(r->pool, tmpUriBuf, domain->ptr, domain->used);
-					k = -1;
+					k = 0;
 				}
 			}
 			CLEAN_EXT(styleField);
