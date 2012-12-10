@@ -451,7 +451,7 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 	char *currURI = currURL + domain->used;
 	register int groupLen = 0, hasDo = 0, stop = 0;
 	//min len <script src="">
-	buffer *styleUri = buffer_init_size(r->pool, (maxTagLen - domain->used - 15));
+	buffer *styleUri = buffer_init_size(r->pool, (maxTagLen - domain->used - 20));
 	if(NULL == styleUri) {
 		return NULL;
 	}
