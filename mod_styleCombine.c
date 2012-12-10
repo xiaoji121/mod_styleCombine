@@ -745,7 +745,7 @@ static void combineStylesAsync(request_rec *r, CombineConfig *pConfig, StyleList
 	headBuf->ptr[headBuf->used++] = '"';
 	STRING_APPEND(r->pool, headBuf, styleList->group->ptr, styleList->group->used - 1);
 	STRING_APPEND(r->pool, headBuf, "\":{\"css\"", 8);
-	unsigned int i = 0, k = 0, count = 0;
+	unsigned int i = 0, count = 0;
 	for(i = 0; i < 2; i++) {
 		LinkedList *list = styleList->list[i];
 		if(NULL == list || !list->size) {
@@ -766,9 +766,9 @@ static void combineStylesAsync(request_rec *r, CombineConfig *pConfig, StyleList
 		StyleField *styleField = (StyleField *) node->value;
 		buffer *domain = pConfig->newDomains[styleField->domainIndex];
 		STRING_APPEND(r->pool, tmpUriBuf, domain->ptr, domain->used);
-		for(k = 0, count = 0; NULL != node; k++, count++) {
+		for(count = 0; NULL != node; count++) {
 			styleField = (StyleField *) node->value;
-			if(k != 0) {
+			if(count) {
 				STRING_APPEND(r->pool, tmpUriBuf, URI_SEPARATOR, 1);
 			}
 			//url拼接在一起的长度超过配置的长度，则需要分成多个请求来处理。(域名+uri+下一个uri +版本长度 + 参数名称长度[版本长度36 + 参数名称长度4])
@@ -786,7 +786,6 @@ static void combineStylesAsync(request_rec *r, CombineConfig *pConfig, StyleList
 				if(list->size >= count + 1) {
 					STRING_APPEND(r->pool, headBuf, "\",", 2);
 					STRING_APPEND(r->pool, tmpUriBuf, domain->ptr, domain->used);
-					k = 0;
 				}
 			}
 			CLEAN_EXT(styleField);
