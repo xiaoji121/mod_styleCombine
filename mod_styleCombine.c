@@ -499,15 +499,24 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 	tmpMaxTagBuf = maxTagBuf + ptag->prefix->used;
 	while(*tmpMaxTagBuf) {
 		if(tmpMaxTagBuf == urlStart) {
+			//解析属性的时候，URL直接跳过不做解析，因为URL中没有属性内容以提高效率
 			tmpMaxTagBuf += (styleUri->used + ptag->refTag->used + domain->used) + 2; // 2 == \"\"
 		}
 		if(isspace(*tmpMaxTagBuf)) {
 			fieldParser = tmpMaxTagBuf;
 			fieldParser++;
+			//data-sc-
+			int fieldPrefixLen = 8;
+			if(0 != memcmp(fieldParser, "data-sc-", fieldPrefixLen)) {
+				tmpMaxTagBuf++;
+				continue;
+			}
+			fieldParser += fieldPrefixLen;
 			switch(*fieldParser) {
+			//data-sc-pos
 			case 'p':
 				if(0 == memcmp(++fieldParser, "os", 2)) {
-					tmpMaxTagBuf += 4; // pos
+					tmpMaxTagBuf += fieldPrefixLen + 4; //" data-sc-pos"
 					int ret = 0;
 					FIELD_PARSE(tmpMaxTagBuf, ret);
 					if(ret == -1) {
@@ -519,9 +528,10 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 					continue;
 				}
 				break;
+			//data-sc-async
 			case 'a':
 				if(0 == memcmp(++fieldParser, "sync", 4)) {
-					tmpMaxTagBuf += 6; // async
+					tmpMaxTagBuf += fieldPrefixLen + 6; //" data-sc-async"
 					int ret = 0;
 					FIELD_PARSE(tmpMaxTagBuf, ret);
 					if(ret == -1) {
@@ -534,9 +544,10 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 					}
 				}
 				break;
+			//data-sc-group
 			case 'g':
 				if(0 == memcmp(++fieldParser, "roup", 4)) {
-					tmpMaxTagBuf += 6;// group
+					tmpMaxTagBuf += fieldPrefixLen + 6;//" data-sc-group"
 					int ret = 0;
 					FIELD_PARSE(tmpMaxTagBuf, ret);
 					if(ret == -1) {
@@ -1135,6 +1146,10 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 			TRIM_RIGHT(curPoint);
 			if (memcmp(ptag->closeTag->ptr, curPoint, ptag->closeTag->used) != 0) {
 				//找不到结束的</script>
+				if(ch != suffixChar) {
+					//在tag超长情况下需要判断最后一个字符是不是>，需要将最后一个字符追加进来
+					maxTagBuf[k - 1] = ch;
+				}
 				STRING_APPEND(r->pool, destBuf, maxTagBuf, k);
 				subHtml = curPoint;
 				continue;
