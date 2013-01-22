@@ -21,12 +21,13 @@
 #include "http_request.h"
 #include "apr_pools.h"
 #include "apr_hash.h"
+#include "apr_lib.h"
 
 #define STYLE_COMBINE_NAME "styleCombine"
 
 module AP_MODULE_DECLARE_DATA styleCombine_module;
 
-#define MODULE_BRAND "styleCombine/1.0.1"
+#define MODULE_BRAND "styleCombine/1.0.2"
 #define EXT_JS ".js"
 #define EXT_CSS ".css"
 #define URI_SEPARATOR "|"
@@ -996,6 +997,21 @@ static void resetHtml(conn_rec *c, apr_bucket_brigade *pbbkOut,
 	return;
 }
 
+static int skipTextArea(char *str) {
+	char *pStr = str;
+	if(0 == strncasecmp("textarea", pStr, 8)) {
+		pStr += 10;
+		while(*pStr) {
+			if(0 == strncasecmp("</textarea>", pStr, 11)) {
+				pStr += 11;
+				break;
+			}
+			++pStr;
+		}
+	}
+	return (pStr - str);
+}
+
 static inline char *strSearch(const char *str1, int **matchedType, int **isExpression) {
 	register char *cp = (char *) str1;
 	register char *s1 = NULL;
@@ -1006,6 +1022,11 @@ static inline char *strSearch(const char *str1, int **matchedType, int **isExpre
 		if ('<' == *cp) {
 			s1 = cp;
 			s1++;
+			int skipCounts = skipTextArea(s1);
+			if(skipCounts > 0) {
+				cp += skipCounts;
+				continue;
+			}
 			switch (*s1) {
 				case 's': //script
 					r = memcmp("cript", ++s1, 5);
@@ -1033,30 +1054,6 @@ static inline char *strSearch(const char *str1, int **matchedType, int **isExpre
 						//skip  "<![endif]-->"
 						cp += 12;
 						*isExpression = (int *) 0;
-					}
-					break;
-				case 't'://if is textarea then skip over
-					if(0 == memcmp("extarea", ++s1, 7)) {
-						cp += 10;//<textarea>
-						while (*cp) {
-							if(0 == memcmp("</textarea>", cp, 11)) {
-								cp += 11;
-								break;
-							}
-							++cp;
-						}
-					}
-					break;
-				case 'T':
-					if (0 == memcmp("EXTAREA", ++s1, 7)) {
-						cp += 10; //<textarea>
-						while (*cp) {
-							if(0 == memcmp("</TEXTAREA>", cp, 11)) {
-								cp += 11;
-								break;
-							}
-							++cp;
-						}
 					}
 					break;
 				default:
@@ -1112,6 +1109,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 		ptag = (1 == (int) matchedType ? jsPtag:cssPtag);
 		//1 skip&filter
 		//2 getField {getType, getPos, getAsync, getGroup}
+		//<script...>    \n </script>
 		char ch = 0, suffixChar = ptag->suffix;
 		int spaceChar = 0 , k = 0;
 		for (i = 0; ((ch = *(curPoint++)) != suffixChar) && i < maxTagSize; i++) {
@@ -1569,13 +1567,28 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 		return ap_pass_brigade(f->next, pbbIn);
 	}
 	/**
-	 * 2 block & white list
+	 * 2 black & white list
 	 */
-	if(uriFilter(r, pConfig->blackList)) {
-		return ap_pass_brigade(f->next, pbbIn);
+	/**
+		黑名单
+		  在黑名单里找到，不使用模块
+		  在黑名单里没有找到，使用模块
+		白名单
+		  在白名单里找到，使用模块
+		  在白名单里没有找到，不使用模块
+
+		黑白名单都有 优先使用黑名单
+		黑白名单都没有  使用模块
+	 */
+	if(pConfig->blackList->size > 0) {
+		if(uriFilter(r, pConfig->blackList)) {
+			return ap_pass_brigade(f->next, pbbIn);
+		}
 	}
-	if(uriFilter(r, pConfig->whiteList)) {
-		return ap_pass_brigade(f->next, pbbIn);
+	if(pConfig->whiteList->size > 0) {
+		if(!uriFilter(r, pConfig->whiteList)) {
+			return ap_pass_brigade(f->next, pbbIn);
+		}
 	}
 	/**
 	 * 3add debugMode
@@ -1757,14 +1770,42 @@ static const char *setVersionFilePath(cmd_parms *cmd, void *dummy, const char *a
 	return NULL;
 }
 
+static int parseargline(char *str, char **pattern) {
+    char quote;
+    while (apr_isspace(*str)) {
+        ++str;
+    }
+    /*
+     * determine first argument
+     */
+    quote = (*str == '"' || *str == '\'') ? *str++ : '\0';
+    *pattern = str;
+    for (; *str; ++str) {
+        if ((apr_isspace(*str) && !quote) || (*str == quote)) {
+            break;
+        }
+        if (*str == '\\' && apr_isspace(str[1])) {
+            ++str;
+            continue;
+        }
+    }
+    if (!*str) {
+        return 1;
+    }
+    *str++ = '\0';
+    return 0;
+}
+
 static const char *setBlackList(cmd_parms *cmd, void *in_dconf, const char *arg) {
 	if(NULL == arg) {
 		return NULL;
 	}
 	ap_regex_t *regexp;
-	const char *str = apr_pstrdup(cmd->pool, arg);
+	char *str = apr_pstrdup(cmd->pool, arg);
 	CombineConfig * pConfig = ap_get_module_config(cmd->server->module_config, &styleCombine_module);
-	regexp = ap_pregcomp(cmd->pool, str, AP_REG_EXTENDED);
+	char *pattern = NULL;
+	parseargline(str, &pattern);
+	regexp = ap_pregcomp(cmd->pool, pattern, AP_REG_EXTENDED);
 	if (!regexp) {
 		return apr_pstrcat(cmd->pool, "blankList: cannot compile regular expression '", str, "'", NULL);
 	}
@@ -1777,9 +1818,11 @@ static const char *setWhiteList(cmd_parms *cmd, void *in_dconf, const char *arg)
 		return NULL;
 	}
 	ap_regex_t *regexp;
-	const char *str = apr_pstrdup(cmd->pool, arg);
+	char *str = apr_pstrdup(cmd->pool, arg);
 	CombineConfig * pConfig = ap_get_module_config(cmd->server->module_config, &styleCombine_module);
-	regexp = ap_pregcomp(cmd->pool, str, AP_REG_EXTENDED);
+	char *pattern = NULL;
+	parseargline(str, &pattern);
+	regexp = ap_pregcomp(cmd->pool, pattern, AP_REG_EXTENDED);
 	if (!regexp) {
 		return apr_pstrcat(cmd->pool, "whiteList: cannot compile regular expression '", str, "'", NULL);
 	}
