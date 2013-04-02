@@ -27,7 +27,7 @@
 
 module AP_MODULE_DECLARE_DATA styleCombine_module;
 
-#define MODULE_BRAND "styleCombine/1.0.2"
+#define MODULE_BRAND "styleCombine/1.0.3"
 #define EXT_JS ".js"
 #define EXT_CSS ".css"
 #define URI_SEPARATOR "|"
@@ -53,10 +53,10 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 #define BUFFER_CLEAN(buffer) if(NULL != buffer) { buffer->used = 0; buffer->ptr[0] = ZERO_END; }
 
 //解析field属性的值，有空格则去空格
-#define FIELD_PARSE(p, ret) {\
+#define FIELD_PARSE(p, ret, symbl) {\
 	while(isspace(*p)){ ++p; }\
 	if('=' == *p++) {\
-		if('"' == *p || '\'' == *p) { ++p; } \
+		if('"' == *p || '\'' == *p) { ++p; symbl = 1;} \
 		while(isspace(*p)){ ++p; }\
 	} else { ret = -1; } \
 }
@@ -68,6 +68,13 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 	} else {\
 		styleField->styleUri->used -= 4;\
 	}\
+}
+
+#define INIT_TAG_CONFIG(tagConfig, nVersion, haveNewLine, sType, haveExt) {\
+	tagConfig->version = nVersion;\
+	tagConfig->isNewLine = haveNewLine;\
+	tagConfig->styleType = sType;\
+	tagConfig->needExt = haveExt;\
 }
 
 //字符串拼接
@@ -90,13 +97,6 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 			buf->ptr[buf->used] = ZERO_END;\
 		}\
 	}\
-}
-
-#define INIT_TAG_CONFIG(tagConfig, nVersion, haveNewLine, sType, haveExt) {\
-	tagConfig->version = nVersion;\
-	tagConfig->isNewLine = haveNewLine;\
-	tagConfig->styleType = sType;\
-	tagConfig->needExt = haveExt;\
 }
 
 int JS_TAG_PREFIX_LEN     = 0, JS_TAG_SUFFIX_LEN     = 0;
@@ -169,6 +169,7 @@ typedef struct {
 	buffer               *styleUri;
 	int                   async;
 	buffer               *group;
+	buffer               *media;
 	enum PositionEnum     position;
 	buffer               *version;
 	int                   styleType;
@@ -181,6 +182,7 @@ typedef struct {
 	buffer          *styleUri;
 	buffer          *version;
 	buffer          *group;
+	buffer          *media;
 	off_t            async;
 	int              isNewLine;
 	int              styleType;
@@ -313,8 +315,7 @@ buffer *getStrVersion(request_rec *r, buffer *styleUri, CombineConfig *pConfig){
 	if(NULL != svsEntry.styleTable) {
 		strVersion = apr_table_get(svsEntry.styleTable, styleUri->ptr);
 		if(NULL == strVersion) {
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
-						"==can't getVersion:ReqURI:[%s]==>StyleURI:[%s]", r->unparsed_uri, styleUri->ptr);
+			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "==can't getVersion:ReqURI:[%s]==>StyleURI:[%s]", r->unparsed_uri, styleUri->ptr);
 		}
 	}
 	if(NULL == strVersion) {
@@ -414,6 +415,35 @@ static void loadStyleVersion(server_rec *server, apr_pool_t *req_pool, CombineCo
 	return;
 }
 
+static int getFieldValueLen(char *str, int symbl) {
+	if(NULL == str) {
+		return 0;
+	}
+	register int valueLen = 0, stop = 0;
+	while(*str) {
+		switch(*str) {
+		case '\'':
+			stop = 1;
+			break;
+		case '"':
+			stop = 1;
+			break;
+		case ' ':
+			//如果是以单双引号开始和结束的，中间可以有空格；否则以空格为结束
+			if(1 == symbl) {
+				break;
+			}
+			stop = 1;
+			break;
+		}
+		if(stop) {
+			break;
+		}
+		++str;
+		++valueLen;
+	}
+	return valueLen;
+}
 static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *ptag, char *maxTagBuf, off_t maxTagLen) {
 	if(NULL == pConfig || NULL == ptag || NULL == maxTagBuf) {
 		return NULL;
@@ -494,7 +524,7 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 	}
 	// get pos & async & group
 	char *fieldParser = NULL;
-	buffer *group = NULL;
+	buffer *group = NULL, *media = NULL;
 	char *urlStart = currURL - ptag->refTag->used - 1; // -1 == ' '
 	enum PositionEnum position = NONE;
 	tmpMaxTagBuf = maxTagBuf + ptag->prefix->used;
@@ -506,7 +536,23 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 		if(isspace(*tmpMaxTagBuf)) {
 			fieldParser = tmpMaxTagBuf;
 			fieldParser++;
-			//data-sc-
+			//parser media
+			if(0 == memcmp(fieldParser, "media", 5)) {
+				tmpMaxTagBuf += 6; //这里加6是因为要多移动一个空格的位置（media+空格）
+				int ret = 0, symbl = 0;
+				FIELD_PARSE(tmpMaxTagBuf, ret, symbl);
+				if(ret == -1) {
+					continue;
+				}
+				int valueLen = getFieldValueLen(tmpMaxTagBuf, symbl);
+				if(valueLen > 0) {
+					media = buffer_init_size(r->pool, valueLen + 8);
+					STRING_APPEND(r->pool, media, tmpMaxTagBuf, valueLen);
+					tmpMaxTagBuf += valueLen;
+					continue;
+				}
+			}
+			//parser data-sc-
 			int fieldPrefixLen = 8;
 			if(0 != memcmp(fieldParser, "data-sc-", fieldPrefixLen)) {
 				tmpMaxTagBuf++;
@@ -518,8 +564,8 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 			case 'p':
 				if(0 == memcmp(++fieldParser, "os", 2)) {
 					tmpMaxTagBuf += fieldPrefixLen + 4; //" data-sc-pos"
-					int ret = 0;
-					FIELD_PARSE(tmpMaxTagBuf, ret);
+					int ret = 0, symbl = 0;
+					FIELD_PARSE(tmpMaxTagBuf, ret, symbl);
 					if(ret == -1) {
 						continue;
 					}
@@ -533,8 +579,8 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 			case 'a':
 				if(0 == memcmp(++fieldParser, "sync", 4)) {
 					tmpMaxTagBuf += fieldPrefixLen + 6; //" data-sc-async"
-					int ret = 0;
-					FIELD_PARSE(tmpMaxTagBuf, ret);
+					int ret = 0, symbl = 0;
+					FIELD_PARSE(tmpMaxTagBuf, ret, symbl);
 					if(ret == -1) {
 						continue;
 					}
@@ -549,37 +595,19 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 			case 'g':
 				if(0 == memcmp(++fieldParser, "roup", 4)) {
 					tmpMaxTagBuf += fieldPrefixLen + 6;//" data-sc-group"
-					int ret = 0;
-					FIELD_PARSE(tmpMaxTagBuf, ret);
+					int ret = 0, symbl = 0;
+					FIELD_PARSE(tmpMaxTagBuf, ret, symbl);
 					if(ret == -1) {
 						continue;
 					}
-					groupLen = 0, stop = 0;
-					char *s = tmpMaxTagBuf;
-					while(*s) {
-						switch(*s) {
-						case '\'':
-							stop = 1;
-							break;
-						case '"':
-							stop = 1;
-							break;
-						case ' ':
-							stop = 1;
-							break;
-						}
-						if(stop) {
-							break;
-						}
-						++s;
-						++groupLen;
-					}
-					if(groupLen) {
-						group = buffer_init_size(r->pool, groupLen + 8);
-						STRING_APPEND(r->pool, group, tmpMaxTagBuf, groupLen);
-						tmpMaxTagBuf += groupLen;
+					int valueLen = getFieldValueLen(tmpMaxTagBuf, symbl);
+					if(valueLen > 0) {
+						group = buffer_init_size(r->pool, valueLen + 8);
+						STRING_APPEND(r->pool, group, tmpMaxTagBuf, valueLen);
+						tmpMaxTagBuf += valueLen;
 						continue;
 					}
+					continue;
 				}
 				break;
 			}
@@ -590,6 +618,7 @@ static StyleField *tagParser(request_rec *r, CombineConfig *pConfig, ParserTag *
 	styleField->styleType = ptag->styleType;
 	styleField->position = position;
 	styleField->styleUri = styleUri;
+	styleField->media = media;
 	if(NULL == group) {
 		//group和pos 都为空时，保持原地不变
 		if(NONE == position) {
@@ -674,9 +703,14 @@ static void addExtStyle(buffer *destBuf, TagConfig *tagConfig) {
 	}
 	if(2 == tagConfig->debugMode) {
 		if(tagConfig->group) {
-			STRING_APPEND(tagConfig->r->pool, destBuf, "\" group=\"", 9);
+			STRING_APPEND(tagConfig->r->pool, destBuf, "\" data-sc-group=\"", 17);
 			STRING_APPEND(tagConfig->r->pool, destBuf, tagConfig->group->ptr, tagConfig->group->used);
 		}
+	}
+	//扩充media属性
+	if(NULL != tagConfig->media) {
+		STRING_APPEND(tagConfig->r->pool, destBuf, "\" media=\"", 9);
+		STRING_APPEND(tagConfig->r->pool, destBuf, tagConfig->media->ptr, tagConfig->media->used);
 	}
 	if (tagConfig->styleType) {
 		STRING_APPEND(tagConfig->r->pool, destBuf, JS_TAG_EXT_SUFFIX_TXT, JS_TAG_EXT_SUFFIX_LEN);
@@ -705,6 +739,7 @@ static void combineStyles(CombineConfig *pConfig, TagConfig *tagConfig, LinkedLi
 	tagConfig->styleType = styleField->styleType;
 	tagConfig->domain    = pConfig->newDomains[styleField->domainIndex];
 	tagConfig->group     = styleField->group;
+	tagConfig->media     = styleField->media;
 	INIT_TAG_CONFIG(tagConfig, versionBuf, 1, tagConfig->styleType, 1);
 	while(NULL != node) {
 		styleField = (StyleField *) node->value;
@@ -964,7 +999,7 @@ static int rStrSearch(const char *str, unsigned int slen, const char matches[], 
 	return -1;
 }
 
-static void resetHtml(conn_rec *c, apr_bucket_brigade *pbbkOut,
+static void resetHtml(request_rec *req, apr_bucket_brigade *pbbkOut,
 						buffer *combinedStyleBuf[], buffer *buf) {
 	if(NULL== buf || NULL == buf->ptr) {
 		return;
@@ -973,12 +1008,11 @@ static void resetHtml(conn_rec *c, apr_bucket_brigade *pbbkOut,
 	int index = 0;
 	char *headIndex = strstr(sourceHtml, "</head>");
 	if(NULL != headIndex) {
-		addBucket(c, pbbkOut, sourceHtml, (index = headIndex - sourceHtml));
+		addBucket(req->connection, pbbkOut, sourceHtml, (index = headIndex - sourceHtml));
 	}
-	addBucket(c, pbbkOut, combinedStyleBuf[TOP]->ptr, combinedStyleBuf[TOP]->used);
-	addBucket(c, pbbkOut, combinedStyleBuf[HEAD]->ptr, combinedStyleBuf[HEAD]->used);
+	addBucket(req->connection, pbbkOut, combinedStyleBuf[TOP]->ptr, combinedStyleBuf[TOP]->used);
+	addBucket(req->connection, pbbkOut, combinedStyleBuf[HEAD]->ptr, combinedStyleBuf[HEAD]->used);
 
-	char *endHtmlIndex = (buf->ptr + buf->used);
 	char *middleIndex = (sourceHtml + index);
 	//因为</body>在整个dom的后部分，从后往前找更近一些
 	int r = rStrSearch(middleIndex, buf->used - index, matches, 7);
@@ -986,21 +1020,23 @@ static void resetHtml(conn_rec *c, apr_bucket_brigade *pbbkOut,
 	if(r != -1) {
 		footerIndex = middleIndex + r;
 	}
+	char *endHtmlIndex = (buf->ptr + buf->used);
+
 	if(NULL != footerIndex) {
-		addBucket(c, pbbkOut, middleIndex, (footerIndex - middleIndex));
-		addBucket(c, pbbkOut, combinedStyleBuf[FOOTER]->ptr, combinedStyleBuf[FOOTER]->used);
-		addBucket(c, pbbkOut, footerIndex, (endHtmlIndex - footerIndex));
+		addBucket(req->connection, pbbkOut, middleIndex, (footerIndex - middleIndex));
+		addBucket(req->connection, pbbkOut, combinedStyleBuf[FOOTER]->ptr, combinedStyleBuf[FOOTER]->used);
+		addBucket(req->connection, pbbkOut, footerIndex, (endHtmlIndex - footerIndex));
 	} else {
-		addBucket(c, pbbkOut, middleIndex, (endHtmlIndex - middleIndex));
-		addBucket(c, pbbkOut, combinedStyleBuf[FOOTER]->ptr, combinedStyleBuf[FOOTER]->used);
+		addBucket(req->connection, pbbkOut, middleIndex, (endHtmlIndex - middleIndex));
+		addBucket(req->connection, pbbkOut, combinedStyleBuf[FOOTER]->ptr, combinedStyleBuf[FOOTER]->used);
 	}
 	return;
 }
 
 static int skipTextArea(char *str) {
-	char *pStr = str;
+	register char *pStr = str;
 	if(0 == strncasecmp("textarea", pStr, 8)) {
-		pStr += 10;
+		pStr += 10; //<textarea>
 		while(*pStr) {
 			if(0 == strncasecmp("</textarea>", pStr, 11)) {
 				pStr += 11;
@@ -1015,13 +1051,16 @@ static int skipTextArea(char *str) {
 static inline char *strSearch(const char *str1, int **matchedType, int **isExpression) {
 	register char *cp = (char *) str1;
 	register char *s1 = NULL;
-
 	register int r = -1;
 	while (*cp) {
 		//compare first
 		if ('<' == *cp) {
+			r = -1;
 			s1 = cp;
 			s1++;
+			if(*s1 == ZERO_END) {
+				return NULL;
+			}
 			int skipCounts = skipTextArea(s1);
 			if(skipCounts > 0) {
 				cp += skipCounts;
@@ -1039,25 +1078,25 @@ static inline char *strSearch(const char *str1, int **matchedType, int **isExpre
 				case '!': //process:<!--[if IE]> <!--[if IE 5.5]>
 					if (0 == memcmp("--", ++s1, 2)) {
 						if ('[' == *(s1 + 2)) {
-							cp += 12; //skip "<!--[if IE]>"
+							cp += 11; //skip "<!--[if IE]>"
 							*isExpression = (int *) 1;
 							continue;
 						}
 						//skip comments "<!--xxxxx -->"
 						for (; *cp != '\0'; cp++) {
 							if (0 == memcmp(cp, "-->", 3)) {
-								cp += 3; // skip "-->"
+								cp += 2; // skip "-->"
 								break;
 							}
 						}
 					} else if('[' == *s1) {
 						//skip  "<![endif]-->"
-						cp += 12;
+						cp += 11;
 						*isExpression = (int *) 0;
 					}
 					break;
 				default:
-					if ('<' != *s1) {
+					if ('<' != *s1 && strlen(cp) > 3) {
 						cp += 3; //skip min tag len  "<a>"
 					}
 					break;
@@ -1065,6 +1104,9 @@ static inline char *strSearch(const char *str1, int **matchedType, int **isExpre
 			if (r == 0) {
 				return (cp);
 			}
+		}
+		if(*cp == ZERO_END) {
+			return NULL;
 		}
 		cp++;
 	}
@@ -1086,6 +1128,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 	tagConfig->debugMode = 0;
 	tagConfig->domain    = NULL;
 	tagConfig->group     = NULL;
+	tagConfig->media     = NULL;
 	tagConfig->styleUri  = NULL;
 	INIT_TAG_CONFIG(tagConfig, NULL, 0, 0, 0);
 	LinkedList *asyncGroups[DOMAIN_COUNTS];
@@ -1096,7 +1139,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 	register ParserTag *ptag                   = NULL;
 	int           *matchedType = 0, *isExpression = 0;
 	register char *curPoint    = NULL, *tmpPoint  = NULL;
-	register int   i = 0, k = 0, isProcessed = 0, combinBufSize = 100;
+	int   i = 0, k = 0, isProcessed = 0, combinBufSize = 100;
 	for(i = 0; i < DOMAIN_COUNTS; i++) {
 		domains[i] = NULL;
 		asyncGroups[i] = NULL;
@@ -1168,6 +1211,7 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 		tagConfig->styleUri = styleField->styleUri;
 		tagConfig->async = styleField->async;
 		tagConfig->group = styleField->group;
+		tagConfig->media = styleField->media;
 		//process expression <!--[if IE]> for js/css CAN'T clean duplicate
 		if(((int) isExpression)) {
 			//拿uri去获取版本号
@@ -1248,7 +1292,6 @@ static int htmlParser(request_rec *r, buffer *combinedStyleBuf[], buffer *destBu
 		//append the tail html
 		int subHtmlLen = (ctx->buf->ptr + ctx->buf->used) - subHtml;
 		STRING_APPEND(r->pool, destBuf, subHtml, subHtmlLen);
-
 		//async clean duplicates
 		ListNode *node = NULL;
 		for(i = 0; i < DOMAIN_COUNTS; i++) {
@@ -1664,12 +1707,12 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 		if(combinedStyleBuf[TOP] && combinedStyleBuf[HEAD] && combinedStyleBuf[FOOTER]) {
 			//if find any style
 			if(htmlParser(r, combinedStyleBuf, destBuf, pConfig, ctx)) {
-				resetHtml(c, ctx->pbbOut, combinedStyleBuf, destBuf);
+				resetHtml(r, ctx->pbbOut, combinedStyleBuf, destBuf);
 			} else {
-				addBucket(c, ctx->pbbOut, ctx->buf->ptr, ctx->buf->used);
+				addBucket(r->connection, ctx->pbbOut, ctx->buf->ptr, ctx->buf->used);
 			}
 		} else {
-			addBucket(c, ctx->pbbOut, ctx->buf->ptr, ctx->buf->used);
+			addBucket(r->connection, ctx->pbbOut, ctx->buf->ptr, ctx->buf->used);
 		}
 	}
 	//append eos
