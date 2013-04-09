@@ -1717,7 +1717,7 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 	}
 	//append eos
 	APR_BRIGADE_INSERT_TAIL(ctx->pbbOut, apr_bucket_eos_create(c->bucket_alloc));
-	apr_table_get(r->notes, "ok");
+	apr_table_setn(r->notes, STYLE_COMBINE_NAME, "ok");
 	apr_brigade_cleanup(pbbIn);
 
 	if(9 == pConfig->printLog) {
