@@ -56,6 +56,7 @@ module AP_MODULE_DECLARE_DATA styleCombine_module;
 #define FIELD_PARSE(p, ret, symbl) {\
 	while(isspace(*p)){ ++p; }\
 	if('=' == *p++) {\
+		while(isspace(*p)){ ++p; }\
 		if('"' == *p || '\'' == *p) { ++p; symbl = 1;} \
 		while(isspace(*p)){ ++p; }\
 	} else { ret = -1; } \
@@ -423,8 +424,6 @@ static int getFieldValueLen(char *str, int symbl) {
 	while(*str) {
 		switch(*str) {
 		case '\'':
-			stop = 1;
-			break;
 		case '"':
 			stop = 1;
 			break;
