@@ -212,7 +212,7 @@ typedef struct ContentBlock {
 	int                  bIndex;
 	int                  eIndex;
 	//用于存放，那些没有合并的style；有内容时 bIndex和eIndex都视无效
-	char                *content;
+	buffer              *cntBlock;
 	//当前对象的类型如是：<head>,</head>, </body>等
 	enum TagNameEnum     tagNameEnum;
 } ContentBlock;
@@ -299,9 +299,9 @@ static ContentBlock *contentBlock_create_init(apr_pool_t *pool, int bIndex, int 
 	if(NULL == contentBlock) {
 		return NULL;
 	}
-	contentBlock->bIndex = bIndex,  contentBlock->eIndex = eIndex;
-	contentBlock->content = NULL;
-	contentBlock->tagNameEnum = tagNameEnum;
+	contentBlock->bIndex       = bIndex,  contentBlock->eIndex = eIndex;
+	contentBlock->cntBlock     = NULL;
+	contentBlock->tagNameEnum  = tagNameEnum;
 	return contentBlock;
 }
 
@@ -732,10 +732,10 @@ static int parserTag(request_rec *r, CombineConfig *pConfig, int styleType, Styl
 		}
 	}
 	styleField->domainIndex = dIndex;
-	styleField->styleType = ptag->styleType;
-	styleField->position = position;
-	styleField->styleUri = styleUri;
-	styleField->media = media;
+	styleField->styleType   = ptag->styleType;
+	styleField->position    = position;
+	styleField->styleUri    = styleUri;
+	styleField->media       = media;
 	if(NULL == group) {
 		//group和pos 都为空时，保持原地不变
 		if(NONE == position) {
@@ -744,7 +744,7 @@ static int parserTag(request_rec *r, CombineConfig *pConfig, int styleType, Styl
 		}
 		//当只有async属性时，保证原地不变
 		if(styleField->async) {
-			styleField->async = 0;
+			styleField->async   = 0;
 			styleField->position = NONE;
 			return count;
 		}
@@ -760,13 +760,13 @@ static int parserTag(request_rec *r, CombineConfig *pConfig, int styleType, Styl
 		//create default group
 		group = buffer_init_size(r->pool, 24);
 		STRING_APPEND(r->pool, group, "_def_group_name_", 16);
-		g = '0' + (int) position;
+		g     = '0' + (int) position;
 	} else {
-		g = '0' + styleField->async;
+		g     = '0' + styleField->async;
 	}
 	group->ptr[group->used++] = g;
-	group->ptr[group->used] = ZERO_END;
-	styleField->group = group;
+	group->ptr[group->used]   = ZERO_END;
+	styleField->group         = group;
 	return count;
 }
 
@@ -779,7 +779,7 @@ static buffer *getStrVersion(request_rec *r, buffer *styleUri, CombineConfig *pC
 		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "==can't getVersion:ReqURI:[%s]==>StyleURI:[%s]", r->unparsed_uri, styleUri->ptr);
 		time_t tv;
 		time(&tv);
-		versionBuf  = buffer_init_size(r->pool, 64);
+		versionBuf      = buffer_init_size(r->pool, 64);
 		//build a dynic version in 6 minutes
 		apr_snprintf(versionBuf->ptr, versionBuf->size, "%ld", (tv / 300));
 		versionBuf->used = strlen(versionBuf->ptr);
@@ -791,12 +791,11 @@ static void makeVersion(apr_pool_t *pool, buffer *buf, buffer *versionBuf) {
 	STRING_APPEND(pool, buf, "?_v=", 4);
 	if(NULL != versionBuf) {
 		if(versionBuf->used > 32) {
-			int i = 0;
 			char md5[3];
 			unsigned char digest[16];
 			apr_md5(digest, (const void *)versionBuf->ptr, versionBuf->used);
 			BUFFER_CLEAN(versionBuf);
-			for(i = 0; i < 16; i++) {
+			for(int i = 0; i < 16; i++) {
 				apr_snprintf(md5, 3, "%02x", digest[i]);
 				STRING_APPEND(pool, versionBuf, md5, 2);
 			}
@@ -855,16 +854,56 @@ static int addExtStyle(buffer *destBuf, TagConfig *tagConfig) {
 	return 1;
 }
 
+/**
+ * style去重，对于异步style去重必须是当整个页面都解析完之后再进行，因为一些异步的js写在页面开始的地方.
+ * 页面实际页面上非异步的style还没有解析到，导致无法与页面上的style去重效果
+ *
+ * key的生成策略，
+ * 非异步为：域名下标+URI
+ * 异步为：域名下标+URI+组名
+ */
+static int isRepeat(request_rec *r, apr_hash_t *duplicats, StyleField *styleField) {
+	if(NULL == duplicats) {
+		return 0;
+	}
+	int len = styleField->styleUri->used;
+	//make a key
+	buffer *key = buffer_init_size(r->pool, len + 26);
+	if(NULL == key) {
+		return 0;
+	}
+	//add domain area
+	key->ptr[key->used++] = '0' + styleField->domainIndex;
+	STRING_APPEND(r->pool, key, styleField->styleUri->ptr, styleField->styleUri->used);
+	if(NULL != apr_hash_get(duplicats, key->ptr, key->used)) {
+		//if uri has exsit then skiping it
+		return 1;
+	}
+	if(styleField->async) {
+		//add group area
+		STRING_APPEND(r->pool, key, styleField->group->ptr, styleField->group->used);
+		if(NULL != apr_hash_get(duplicats, key->ptr, key->used)) {
+			//if uri has exsit then skiping it
+			return 1;
+		}
+	}
+	apr_hash_set(duplicats, key->ptr, key->used, "1");
+	return 0;
+}
+
 static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig) {
 
 	if (NULL == ctx->buf) {
 		return 0;
 	}
-	char *input = ctx->buf->ptr;
+	char *input           = ctx->buf->ptr;
 
 	//创建一个列表，用于存放所有的索引对象，包括一些未分组和未指定位置的style
-	ContentBlock *block = NULL;
+	ContentBlock *block   = NULL;
 	LinkedList *blockList = linked_list_create(req->pool);
+
+	//用于去重的 hash
+	apr_hash_t *duplicates= apr_hash_make(req->pool);
 
 	char *istr = input, *istrTemp = NULL;
 	int isExpression = 0, retIndex = 0, bIndex = 0, eIndex = 0;
@@ -950,10 +989,21 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 			//IE条件表达式里面的style不能做去重操作
 			if(isExpression) {
 				styleField->version = getStrVersion(req, styleField->styleUri, pConfig);
-				block               = contentBlock_create_init(req->pool, 0, 0, TN_NONE);
-//				block->content      =
+				block               = contentBlock_create_init(req->pool, 0, 1, TN_NONE);
+				block->cntBlock     = buffer_init_size(req->pool, tagConfig->domain->used + styleField->styleUri->used + 100);
+				addExtStyle(block->cntBlock ,tagConfig);
 				add(req->pool, blockList, (void *) block);
+				bIndex              = eIndex += retLen;
+				istr               += retLen;
+				continue;
 			}
+			//clean duplicate
+			if(!styleField->async && isRepeat(req, duplicates, styleField)) {
+				bIndex              = eIndex += retLen;
+				istr               += retLen;
+				continue;
+			}
+
 			break;
 		case 's':
 			retIndex = compare(istr, patterns[SCRIPT], patternsLen[SCRIPT], 0);
