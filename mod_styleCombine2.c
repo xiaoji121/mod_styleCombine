@@ -527,6 +527,26 @@ static int getFieldValueLen(char *str, int symbl) {
 	return valueLen;
 }
 
+static enum PositionEnum strToPosition(char *str, int **posLen) {
+	if(NULL == str) {
+		return NONE;
+	}
+	if (0 == strncmp(POSITION_TOP, str, 3)) {
+		*posLen = (int *)3;
+		return TOP;
+	}
+	if (0 == strncmp(POSITION_HEAD, str, 4)) {
+		*posLen = (int *)4;
+		return HEAD;
+	}
+	if (0 == strncmp(POSITION_FOOTER, str, 6)) {
+		*posLen = (int *)6;
+		return FOOTER;
+	}
+	*posLen = (int *)0;
+	return NONE;
+}
+
 static int parserTag(request_rec *r, CombineConfig *pConfig, int styleType, StyleField **pStyleField, char *input) {
 	StyleParserTag *ptag = styleParserTags[styleType];
 	if(NULL == pConfig || NULL == ptag || NULL == input) {
@@ -540,10 +560,10 @@ static int parserTag(request_rec *r, CombineConfig *pConfig, int styleType, Styl
 	}
 	//偏移开头部分(<link, <script), 传进来的input没有<打头，但所有的<link,<script 后面必须紧接空格，所以长度正好抵消
 	inputTemp          += ptag->prefix->used;
-	int count           = 0;
+	int count           = ptag->prefix->used;
 	char ch , pchar;
 
-	for(ch = *inputTemp; (ZERO_END != ch && ch != ptag->suffix); ch = *(inputTemp++), count++) {
+	for(ch = *inputTemp; (ZERO_END != ch && ch != ptag->suffix); ch = *(++inputTemp), count++) {
 		//换行直接跳过, 并去除重复的空格
 		if('\n' == ch || '\r' == ch) {
 			continue;
@@ -569,18 +589,18 @@ static int parserTag(request_rec *r, CombineConfig *pConfig, int styleType, Styl
 			tagBuf = newTagBuf;
 		}
 	}
-	tagBuf->ptr[tagBuf->used++] = ZERO_END;
+	tagBuf->ptr[tagBuf->used] = ZERO_END;
 	if (ptag->styleType) {
 		//对script需要特别处理，因为它是以</script>为结束，那么需要确定它是否是这样的。
 		//如果不是那么则认为它是一个script代码块，或无效的js引用
-		++inputTemp;
+		++inputTemp, ++count;
 		TRIM_RIGHT(inputTemp);
 		if (memcmp(ptag->closeTag->ptr, inputTemp, ptag->closeTag->used) != 0) {
 			return count;
 		}
-		inputTemp       +=  ptag->closeTag->used;
+		inputTemp       += ptag->closeTag->used;
+		count           += ptag->closeTag->used;
 	}
-	count                = input - inputTemp;
 	//===start parser===
 	int dIndex           = 0;
 	buffer *domain       = NULL;
@@ -795,7 +815,8 @@ static void makeVersion(apr_pool_t *pool, buffer *buf, buffer *versionBuf) {
 			unsigned char digest[16];
 			apr_md5(digest, (const void *)versionBuf->ptr, versionBuf->used);
 			BUFFER_CLEAN(versionBuf);
-			for(int i = 0; i < 16; i++) {
+			int i = 0;
+			for(i = 0; i < 16; i++) {
 				apr_snprintf(md5, 3, "%02x", digest[i]);
 				STRING_APPEND(pool, versionBuf, md5, 2);
 			}
@@ -891,13 +912,15 @@ static int isRepeat(request_rec *r, apr_hash_t *duplicats, StyleField *styleFiel
 	return 0;
 }
 
+static void parserWithCombine(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig) {
+}
+
 static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig) {
 
 	if (NULL == ctx->buf) {
 		return 0;
 	}
 	char *input           = ctx->buf->ptr;
-
 	//创建一个列表，用于存放所有的索引对象，包括一些未分组和未指定位置的style
 	ContentBlock *block   = NULL;
 	LinkedList *blockList = linked_list_create(req->pool);
@@ -905,8 +928,10 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 	//用于去重的 hash
 	apr_hash_t *duplicates= apr_hash_make(req->pool);
 
-	char *istr = input, *istrTemp = NULL;
-	int isExpression = 0, retIndex = 0, bIndex = 0, eIndex = 0;
+	int styleType              = 0;
+	enum TagNameEnum tnameEnum = LINK;
+	char *istr                 = input, *istrTemp = NULL;
+	int isExpression           = 0, retIndex = 0, bIndex = 0, eIndex = 0;
 	int offsetLen = 0;
 
 	while (*istr) {
@@ -962,21 +987,28 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 			istr         += offsetLen;
 			add(req->pool, blockList, (void *) block);
 			break;
-		case 'l':
-			retIndex = compare(istr, patterns[LINK], patternsLen[LINK], 0);
+		case 'l': // find link
+		case 's': // find script
+			if('s' == *istr) { //默认是 link
+				styleType              = 1;
+				tnameEnum              = SCRIPT;
+			}
+			retIndex = compare(istr, patterns[tnameEnum], patternsLen[tnameEnum], 0);
 			if(0 != retIndex) {
 				istr++ , eIndex++;
 				continue;
 			}
-			block         = contentBlock_create_init(req->pool, bIndex, eIndex, LINK);
+			block         = contentBlock_create_init(req->pool, bIndex, --eIndex, tnameEnum);
 			add(req->pool, blockList, (void *) block);
 			bIndex        = eIndex;
 			//parser Tag
 			StyleField *styleField = NULL;
-			int retLen = parserTag(req, pConfig, 0, &styleField, istr);
+			int retLen = parserTag(req, pConfig, styleType, &styleField, istr);
 			if(NULL == styleField) { //a error style
-				eIndex  += retLen;
-				istr    += retLen;
+				block->eIndex += retLen + 1;
+				bIndex         = block->eIndex;
+				eIndex         = block->eIndex;
+				istr          += retLen;
 				continue;
 			}
 
@@ -1004,13 +1036,8 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 				continue;
 			}
 
-			break;
-		case 's':
-			retIndex = compare(istr, patterns[SCRIPT], patternsLen[SCRIPT], 0);
-			if(0 != retIndex) {
-				istr++ , eIndex++;
-				continue;
-			}
+			//buffer *nversion = getStrVersion(req, styleField->styleUri, pConfig);
+
 			break;
 		case '!': // find <!-- ... --> or <!--[if IE]> <!--[if IE 5.5]>....<![endif]-->
 			retIndex = compare(istr, patterns[COMMENT_EXPRESSION], patternsLen[COMMENT_EXPRESSION], 0);
@@ -1053,6 +1080,8 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 		}
 	}
 
+	block         = contentBlock_create_init(req->pool, bIndex, eIndex, TN_NONE);
+	add(req->pool, blockList, (void *) block);
 	//test
 	ListNode *node = blockList->first;
 	for(; NULL != node; node = node->next) {
