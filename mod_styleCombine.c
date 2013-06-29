@@ -986,10 +986,10 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 				continue;
 			}
 
-			block         = contentBlock_create_init(req->pool, bIndex, --eIndex, EHEAD);
+			block         = contentBlock_create_init(req->pool, bIndex, --eIndex, tnameEnum);
 			add(req->pool, blockList, (void *) block);
 			RESET(bIndex, eIndex);
-			NEXT_CHARS(istr, eIndex, patternsLen[EHEAD] + 1);    //偏移 /head> 6个字符长度
+			NEXT_CHARS(istr, eIndex, patternsLen[tnameEnum] + 1);    //偏移 /head>|/body> 6个字符长度
 			break;
 		case 'T':
 		case 't': // find <textarea ...>...</textarea>  must be suppor (upper&lower) case
@@ -1195,6 +1195,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 		return 0;
 	}
 
+	//追加尾部的内容
 	block         = contentBlock_create_init(req->pool, bIndex, eIndex, TN_NONE);
 	add(req->pool, blockList, (void *) block);
 
