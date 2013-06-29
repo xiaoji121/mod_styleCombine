@@ -9,6 +9,7 @@
 #include <sys/types.h>
 #include <ctype.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include "httpd.h"
 #include "apr_buckets.h"
 #include "http_config.h"
@@ -21,6 +22,8 @@
 #include "apr_pools.h"
 #include "apr_hash.h"
 #include "apr_lib.h"
+#include "apr_md5.h"
+
 
 module AP_MODULE_DECLARE_DATA                styleCombine_module;
 
@@ -92,7 +95,7 @@ module AP_MODULE_DECLARE_DATA                styleCombine_module;
 		if(buf->used + strLen >= buf->size) {\
 			char *data = buf->ptr;\
 			if(!prepare_buffer_size(pool, buf, buf->size + (strLen + BUFFER_PIECE_SIZE))) {\
-				ap_log_error(APLOG_MARK, APLOG_ERR, 0, server, "realloc error[%d] [%s]===[%ld]", getpid(),str, buf->size);\
+				ap_log_error(APLOG_MARK, APLOG_ERR, 0, server, "realloc error[%d] [%s]===[%ld]", getpid(), str, buf->size);\
 				appenStat = -1;\
 			}\
 			if(-1 != appenStat) { memcpy(buf->ptr, data, buf->used); }\
@@ -124,8 +127,8 @@ static int   patternsLen[6];
 
 typedef struct {
 	char              *ptr;
-	off_t              used;
-	off_t              size;
+	long               used;
+	long               size;
 } buffer;
 
 typedef struct {
@@ -239,19 +242,6 @@ StyleField *style_field_create(apr_pool_t *pool) {
 	return styleField;
 }
 
-buffer *buffer_init_size(apr_pool_t *pool, size_t in_size) {
-	buffer *buf = (buffer *) apr_palloc(pool, sizeof(buffer));
-	if(NULL == buf) {
-		return buf;
-	}
-	buf->ptr = NULL;
-	buf->used = 0;
-	buf->size = 0;
-	if(!prepare_buffer_size(pool, buf, in_size)) {
-		return NULL;
-	}
-	return buf;
-}
 int prepare_buffer_size(apr_pool_t *pool, buffer *buf, size_t in_size) {
 	if(NULL == buf) {
 		return 0;
@@ -267,6 +257,20 @@ int prepare_buffer_size(apr_pool_t *pool, buffer *buf, size_t in_size) {
 	buf->ptr[0] = ZERO_END;
 	buf->size = size;
 	return size;
+}
+
+buffer *buffer_init_size(apr_pool_t *pool, size_t in_size) {
+	buffer *buf = (buffer *) apr_palloc(pool, sizeof(buffer));
+	if(NULL == buf) {
+		return buf;
+	}
+	buf->ptr = NULL;
+	buf->used = 0;
+	buf->size = 0;
+	if(!prepare_buffer_size(pool, buf, in_size)) {
+		return NULL;
+	}
+	return buf;
 }
 
 int add(apr_pool_t *pool, LinkedList *list, void *item) {
@@ -564,7 +568,7 @@ static int parserTag(request_rec *r, CombineConfig *pConfig, int styleType, buff
 		if('\n' == ch || '\r' == ch) {
 			continue;
 		}
-		ch = ('\t' == ch ? ' ': ch); //将\t转为空格
+		ch = ('\t' == ch ? ' ' : ch); //将\t转为空格
 		if(isspace(ch) && isspace(pchar)) {
 			continue;
 		}
@@ -900,6 +904,17 @@ static int isRepeat(request_rec *r, apr_hash_t *duplicats, StyleField *styleFiel
 	return 0;
 }
 
+#define NEXT_CHARS(istr, eIndex, offset) { istr += offset, eIndex += offset; }
+
+#define NEXT_CHAR(istr, eIndex) { istr++, eIndex++; }
+
+#define RESET(bIndex, eIndex) { bIndex = eIndex; }
+
+#define NEXT_CHARS_WITH_RESET(istr, bIndex, eIndex, offset) { \
+	NEXT_CHARS(istr, eIndex, offset); \
+	RESET(bIndex, eIndex); \
+}
+
 static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig) {
 
 	if (NULL == ctx->buf) {
@@ -914,7 +929,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 	apr_hash_t *duplicates= apr_hash_make(req->pool);
 
 	//用于存放解析出来的style URL 长度为 maxURL的2倍
-	buffer     *tagBuf    = buffer_init_size(pConfig->maxUrlLen * 2);
+	buffer     *tagBuf    = buffer_init_size(req->pool, pConfig->maxUrlLen * 2);
 
 	//域名数组，用于存放不同域名下的styleMap
 	apr_hash_t *domains[DOMAIN_COUNTS] = {NULL, NULL};
@@ -933,41 +948,39 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 
 	while (*istr) {
 		if ('<' != *istr) {
-			++istr, ++eIndex;
+			NEXT_CHAR(istr, eIndex);
 			continue;
 		}
-		++istr, ++eIndex;
+		NEXT_CHAR(istr, eIndex);
 		switch (*istr) {
 		case 'H':
 		case 'h': // find <head>
 			retIndex = compare(istr, patterns[BHEAD], patternsLen[BHEAD], 0);
 			if(0 != retIndex) {
-				istr++ , eIndex++;                         //偏移 h 1个字符长度
+				NEXT_CHAR(istr, eIndex);                         //偏移 h 1个字符长度
 				continue;
 			}
-			eIndex       += offsetLen = patternsLen[BHEAD] + 1; //偏移 > 1个结束符字符长度
+			NEXT_CHARS(istr, eIndex, patternsLen[BHEAD] + 1);    //偏移 > 1个结束符字符长度
 			block         = contentBlock_create_init(req->pool, bIndex, eIndex, BHEAD);
-			bIndex        = eIndex;
-			istr         += offsetLen;
 			add(req->pool, blockList, (void *) block);
+			RESET(bIndex, eIndex);
 			break;
 		case '/': // find </head>
 			retIndex = compare(istr, patterns[EHEAD], patternsLen[EHEAD], 0);
 			if(0 != retIndex) {
-				istr++, eIndex++;
+				NEXT_CHAR(istr, eIndex);
 				continue;
 			}
 			block         = contentBlock_create_init(req->pool, bIndex, --eIndex, EHEAD);
-			bIndex        = eIndex;
-			eIndex       += offsetLen = patternsLen[EHEAD] + 1;  //偏移 /head> 6个字符长度
-			istr         += offsetLen;
 			add(req->pool, blockList, (void *) block);
+			RESET(bIndex, eIndex);
+			NEXT_CHARS(istr, eIndex, patternsLen[EHEAD] + 1);    //偏移 /head> 6个字符长度
 			break;
 		case 'T':
 		case 't': // find <textarea ...>...</textarea>  must be suppor (upper&lower) case
 			retIndex = compare(istr, patterns[TEXTAREA], patternsLen[TEXTAREA], 1);
 			if (0 != retIndex) {
-				istr++ , eIndex++;
+				NEXT_CHAR(istr, eIndex);
 				continue;
 			}
 			char *textArea = istr + patternsLen[TEXTAREA] + 1; // 偏移 textarea> 9个字符长度
@@ -978,11 +991,10 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 				}
 				++textArea;
 			}
-			eIndex       += offsetLen = textArea - (istr - 1);
+			NEXT_CHARS(istr, eIndex, textArea - (istr - 1));
 			block         = contentBlock_create_init(req->pool, bIndex, eIndex, TEXTAREA);
-			bIndex        = eIndex;
-			istr         += offsetLen;
 			add(req->pool, blockList, (void *) block);
+			RESET(bIndex, eIndex);
 			break;
 		case 'l': // find link
 		case 's': // find script
@@ -992,25 +1004,30 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 			}
 			retIndex = compare(istr, patterns[tnameEnum], patternsLen[tnameEnum], 0);
 			if(0 != retIndex) {
-				istr++ , eIndex++;
+				NEXT_CHAR(istr, eIndex);
 				continue;
 			}
 			block         = contentBlock_create_init(req->pool, bIndex, --eIndex, tnameEnum);
 			add(req->pool, blockList, (void *) block);
-			bIndex        = eIndex;
+			RESET(bIndex, eIndex);
+
 			//parser Tag
 			StyleField *styleField = NULL;
 			int retLen = parserTag(req, pConfig, styleType, tagBuf, &styleField, istr);
-			if(NULL == styleField) { //a error style
-				block->eIndex += retLen + 1;
-				bIndex         = block->eIndex;
-				eIndex         = block->eIndex;
-				istr          += retLen;
+			if(NULL == styleField) { //an error style
+				NEXT_CHARS_WITH_RESET(istr, bIndex, eIndex, retLen);
+				block->eIndex = eIndex;
 				continue;
 			}
 
+			//扫过的内容位置记录下来保存到列表中
+			block              = contentBlock_create_init(req->pool, bIndex, eIndex, TN_NONE);
+			add(req->pool, blockList, (void *) block);
+			NEXT_CHARS_WITH_RESET(istr, bIndex, eIndex, retLen);
+
 			TagConfig *tagConfig = (TagConfig *) apr_palloc(req->pool, sizeof(TagConfig));
 			if(NULL == tagConfig) {
+				//FIXME: 添加日志或其它处理
 				continue;
 			}
 			INIT_TAG_CONFIG(tagConfig, req, styleField, pConfig->newDomains[styleField->domainIndex], ctx->debugMode, 0, 0);
@@ -1019,32 +1036,26 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 			//IE条件表达式里面的style不能做去重操作
 			if(isExpression) {
 				styleField->version = getStrVersion(req, styleField->styleUri, pConfig);
-				block               = contentBlock_create_init(req->pool, 0, 1, TN_NONE);
+				block               = contentBlock_create_init(req->pool, -1, 0, TN_NONE);
 				block->cntBlock     = buffer_init_size(req->pool, tagConfig->domain->used + styleField->styleUri->used + 100);
-				addExtStyle(block->cntBlock, tagConfig);
 				add(req->pool, blockList, (void *) block);
-				bIndex              = eIndex += retLen;
-				istr               += retLen;
-				continue;
-			}
-			//clean duplicate
-			if(!styleField->async && isRepeat(req, duplicates, styleField)) {
-				bIndex              = eIndex += retLen;
-				istr               += retLen;
+				addExtStyle(block->cntBlock, tagConfig);
 				continue;
 			}
 
-			buffer *nversion    = getStrVersion(req, styleField->styleUri, pConfig);
-			styleField->version = nversion;
+			//clean duplicate
+			if(!styleField->async && isRepeat(req, duplicates, styleField)) {
+				continue;
+			}
+
+			styleField->version = getStrVersion(req, styleField->styleUri, pConfig);
 
 			//当没有使用异步并且又没有设置位置则保持原位不动
 			if(0 == styleField->async && NONE == styleField->position) {
 				block               = contentBlock_create_init(req->pool, 0, 1, TN_NONE);
 				block->cntBlock     = buffer_init_size(req->pool, tagConfig->domain->used + styleField->styleUri->used + 100);
-				addExtStyle(block->cntBlock, tagConfig);
 				add(req->pool, blockList, (void *) block);
-				bIndex              = eIndex += retLen;
-				istr               += retLen;
+				addExtStyle(block->cntBlock, tagConfig);
 				continue;
 			}
 
