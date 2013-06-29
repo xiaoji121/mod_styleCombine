@@ -74,12 +74,12 @@ module AP_MODULE_DECLARE_DATA                styleCombine_module;
 	}\
 }
 
-#define INIT_TAG_CONFIG(tagConfig, req, stylefield, newDomain, haveNewLine, newDebugMode, haveExt) {\
+#define INIT_TAG_CONFIG(tagConfig, req, stylefield, newDomain, newDebugMode, haveNewLine, haveExt) {\
 	tagConfig->r = req;\
 	tagConfig->styleField = stylefield;\
 	tagConfig->domain = newDomain;\
-	tagConfig->isNewLine = haveNewLine;\
 	tagConfig->debugMode = newDebugMode;\
+	tagConfig->isNewLine = haveNewLine;\
 	tagConfig->needExt = haveExt;\
 }
 
@@ -546,17 +546,14 @@ static enum PositionEnum strToPosition(char *str, int **posLen) {
 	return NONE;
 }
 
-static int parserTag(request_rec *r, CombineConfig *pConfig, int styleType, StyleField **pStyleField, char *input) {
+static int parserTag(request_rec *r, CombineConfig *pConfig, int styleType, buffer *tagBuf, StyleField **pStyleField, char *input) {
+
 	StyleParserTag *ptag = styleParserTags[styleType];
-	if(NULL == pConfig || NULL == ptag || NULL == input) {
+
+	if(NULL == pConfig || NULL == ptag || NULL == input || NULL == tagBuf) {
 		return 0;
 	}
 	char *inputTemp     = input;
-	int tagBufSpace     = 1;
-	buffer *tagBuf      =  buffer_init_size(r->pool, 1024);
-	if(NULL == tagBuf) {
-		return 0;
-	}
 	//偏移开头部分(<link, <script), 传进来的input没有<打头，但所有的<link,<script 后面必须紧接空格，所以长度正好抵消
 	inputTemp          += ptag->prefix->used;
 	int count           = ptag->prefix->used;
@@ -573,19 +570,11 @@ static int parserTag(request_rec *r, CombineConfig *pConfig, int styleType, Styl
 		}
 		pchar           = ch;
 
-		if(tagBuf->used - 1 < tagBuf->size) {
+		if(tagBuf->used + 1 < tagBuf->size) {
 			tagBuf->ptr[tagBuf->used++] = ch;
 		} else {
-			//重新创建一块空间来存放标签，将原来的值拷入新空间，但空间的大小不能超过 1024*3
-			if(++tagBufSpace > 3) {
-				return count;
-			}
-			buffer *newTagBuf =  buffer_init_size(r->pool, 1024 * tagBufSpace);
-			if(NULL == newTagBuf) {
-				return count;
-			}
-			STRING_APPEND(r->pool, newTagBuf, tagBuf->ptr, tagBuf->used);
-			tagBuf = newTagBuf;
+			//FIXME:add log  the url is too long
+			return count;
 		}
 	}
 	tagBuf->ptr[tagBuf->used] = ZERO_END;
@@ -924,6 +913,18 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 	//用于去重的 hash
 	apr_hash_t *duplicates= apr_hash_make(req->pool);
 
+	//用于存放解析出来的style URL 长度为 maxURL的2倍
+	buffer     *tagBuf    = buffer_init_size(pConfig->maxUrlLen * 2);
+
+	//域名数组，用于存放不同域名下的styleMap
+	apr_hash_t *domains[DOMAIN_COUNTS] = {NULL, NULL};
+
+	//用于存放 同步（直接加载）的style列表
+	LinkedList *syncStyleList  = linked_list_create(req->pool);
+
+	//用于存放 异步的style列表
+	LinkedList *asyncStyleList = linked_list_create(req->pool);
+
 	int styleType              = 0, styleCount    = 0;
 	enum TagNameEnum tnameEnum = LINK;
 	char *istr                 = input, *istrTemp = NULL;
@@ -999,7 +1000,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 			bIndex        = eIndex;
 			//parser Tag
 			StyleField *styleField = NULL;
-			int retLen = parserTag(req, pConfig, styleType, &styleField, istr);
+			int retLen = parserTag(req, pConfig, styleType, tagBuf, &styleField, istr);
 			if(NULL == styleField) { //a error style
 				block->eIndex += retLen + 1;
 				bIndex         = block->eIndex;
@@ -1020,7 +1021,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 				styleField->version = getStrVersion(req, styleField->styleUri, pConfig);
 				block               = contentBlock_create_init(req->pool, 0, 1, TN_NONE);
 				block->cntBlock     = buffer_init_size(req->pool, tagConfig->domain->used + styleField->styleUri->used + 100);
-				addExtStyle(block->cntBlock ,tagConfig);
+				addExtStyle(block->cntBlock, tagConfig);
 				add(req->pool, blockList, (void *) block);
 				bIndex              = eIndex += retLen;
 				istr               += retLen;
@@ -1033,7 +1034,71 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 				continue;
 			}
 
-			//buffer *nversion = getStrVersion(req, styleField->styleUri, pConfig);
+			buffer *nversion    = getStrVersion(req, styleField->styleUri, pConfig);
+			styleField->version = nversion;
+
+			//当没有使用异步并且又没有设置位置则保持原位不动
+			if(0 == styleField->async && NONE == styleField->position) {
+				block               = contentBlock_create_init(req->pool, 0, 1, TN_NONE);
+				block->cntBlock     = buffer_init_size(req->pool, tagConfig->domain->used + styleField->styleUri->used + 100);
+				addExtStyle(block->cntBlock, tagConfig);
+				add(req->pool, blockList, (void *) block);
+				bIndex              = eIndex += retLen;
+				istr               += retLen;
+				continue;
+			}
+
+			/**
+			 * ---domains[2]               两个域名
+			 *    ---groupsMap[N]          域名下有多个分组，用于对每个分组内容进行隔离（异步和同步的都放在这里面）
+			 *       ---styleList[2]       每个分组下面有js、css列表
+			 *       |  ---itemList[N]     js/css列表
+			 *       |
+			 * 输出/合并时根据以下两个List 按顺序输出；（styleList指针为上面注释中所指的 "styleList[2]" 的指针）
+			 *    ---syncStyleList         存放所有同步（直接加载）的 styleList指针
+			 *    ---asyncStyleList        存放所有异步的 styleList指针
+			 *
+			 */
+
+			StyleList *styleList = NULL;
+			apr_hash_t *groupsMap = domains[styleField->domainIndex];
+			if(NULL == groupsMap) {
+				domains[styleField->domainIndex] = groupsMap = apr_hash_make(req->pool);
+			} else {
+				styleList = apr_hash_get(groupsMap, styleField->group->ptr, styleField->group->used);
+			}
+
+			if(NULL == styleList || NULL == styleList->list[styleField->styleType]) {
+				if(NULL == styleList) {
+					styleList = (StyleList *) apr_palloc(req->pool, sizeof(StyleList));
+					if(NULL == styleList) {
+						//FIXME: 如果内存分配失败，则丢掉当前这个数据
+						continue;
+					}
+					styleList->list[0] = NULL, styleList->list[1] = NULL;
+					/**
+					 * 将所有的styleList放入相应的 异步和非异步的列表中去。用于输出合并时使用。
+					 */
+					add(req->pool, (styleField->async == 1 ? asyncStyleList : syncStyleList), styleList);
+				}
+
+				LinkedList *itemList = linked_list_create(req->pool);
+				if(NULL == itemList) {
+					//FIXME: 如果内存分配失败，则丢掉当前这个数据
+					continue;
+				}
+
+				add(req->pool, itemList, styleField);
+				styleList->domainIndex = styleField->domainIndex;
+				styleList->group = styleField->group;
+				styleList->list[styleField->styleType] = itemList;
+				/**
+				 * 通过使用hash来控制每个group对应一个list
+				 */
+				apr_hash_set(groupsMap, styleField->group->ptr, styleField->group->used, styleList);
+			} else {
+				add(req->pool, styleList->list[styleField->styleType], styleField);
+			}
 
 			break;
 		case '!':
@@ -1078,6 +1143,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 				istr += 8, eIndex += 8;                     //偏移 [if IE]> 8个字符“以最小集的长度来换算，其它 eq IE9/ge IE6则忽略”
 				continue;
 			}
+
 			// 处理当前是一段 HTML 解释语法
 			while(*istr) {
 				if (0 == memcmp(istr, "-->", 3)) {
@@ -1139,9 +1205,9 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 
 	svsEntry.mtime         = 0;
 	svsEntry.newPool       = NULL; svsEntry.oldPool = NULL;
-	svsEntry.styleHTable    = NULL;
+	svsEntry.styleHTable   = NULL;
 
-	pConfig->enabled       = 0;
+	pConfig->enabled       = 1;
 	pConfig->printLog      = 0;
 	pConfig->filterCntType = "text/htm;text/html";
 	pConfig->appName       = NULL;
@@ -1333,12 +1399,17 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 		//set debugMode value
 		ctx->debugMode = debugMode;
 	}
+
+	//FIXME:保留trunked传输方式
 	apr_bucket *pbktIn = NULL;
 	for (pbktIn = APR_BRIGADE_FIRST(pbbIn);
 	            pbktIn != APR_BRIGADE_SENTINEL(pbbIn);
 	            pbktIn = APR_BUCKET_NEXT(pbktIn)) {
 		if(APR_BUCKET_IS_EOS(pbktIn)) {
 			int pstatus = htmlParser(r, ctx, pConfig);
+			if(0 == pstatus) {  //FIXME: 没有找到任何的style，则直接保持原来的数据输出，不需要做任何变化
+
+			}
 			addBucket(r->connection, ctx->pbbOut, ctx->buf->ptr, ctx->buf->used);
 			//append EOS
 			APR_BRIGADE_INSERT_TAIL(ctx->pbbOut, pbktIn);
@@ -1503,27 +1574,27 @@ static const char *setWhiteList(cmd_parms *cmd, void *in_dconf, const char *arg)
 
 static const command_rec styleCombineCmds[] =
 {
-		AP_INIT_FLAG("enabled", setEnabled, NULL, OR_ALL, "open or close this module"),
+		AP_INIT_FLAG("scEnabled", setEnabled, NULL, OR_ALL, "open or close this module"),
 
-		AP_INIT_TAKE1("appName", setAppName, NULL, OR_ALL, "app name"),
+		AP_INIT_TAKE1("scAppName", setAppName, NULL, OR_ALL, "app name"),
 
-		AP_INIT_TAKE1("filterCntType", setFilterCntType, NULL, OR_ALL, "filter content type"),
+		AP_INIT_TAKE1("scFilterCntType", setFilterCntType, NULL, OR_ALL, "filter content type"),
 
-		AP_INIT_TAKE1("oldDomains", setOldDomains, NULL, OR_ALL, "style old domain url"),
+		AP_INIT_TAKE1("scOldDomains", setOldDomains, NULL, OR_ALL, "style old domain url"),
 
-		AP_INIT_TAKE1("newDomains", setNewDomains, NULL, OR_ALL, "style new domain url"),
+		AP_INIT_TAKE1("scNewDomains", setNewDomains, NULL, OR_ALL, "style new domain url"),
 
-		AP_INIT_TAKE1("asyncVariableNames", setAsyncVariableNames, NULL, OR_ALL, "the name for asynStyle of variable"),
+		AP_INIT_TAKE1("scAsyncVariableNames", setAsyncVariableNames, NULL, OR_ALL, "the name for asynStyle of variable"),
 
-		AP_INIT_TAKE1("maxUrlLen", setMaxUrlLen, NULL, OR_ALL, "url max len default is IE6 length support"),
+		AP_INIT_TAKE1("scMaxUrlLen", setMaxUrlLen, NULL, OR_ALL, "url max len default is IE6 length support"),
 
-		AP_INIT_TAKE1("printLog", setPrintLog, NULL, OR_ALL, " set printLog level"),
+		AP_INIT_TAKE1("scPrintLog", setPrintLog, NULL, OR_ALL, " set printLog level"),
 
-		AP_INIT_TAKE1("versionFilePath", setVersionFilePath, NULL, OR_ALL, "style versionFilePath dir"),
+		AP_INIT_TAKE1("scVersionFilePath", setVersionFilePath, NULL, OR_ALL, "style versionFilePath dir"),
 
-		AP_INIT_RAW_ARGS("blackList", setBlackList, NULL, OR_ALL, "style versionFilePath dir"),
+		AP_INIT_RAW_ARGS("scBlackList", setBlackList, NULL, OR_ALL, "style versionFilePath dir"),
 
-		AP_INIT_RAW_ARGS("whiteList", setWhiteList, NULL, OR_ALL, "style versionFilePath dir"),
+		AP_INIT_RAW_ARGS("scWhiteList", setWhiteList, NULL, OR_ALL, "style versionFilePath dir"),
 
 		{ NULL }
 };
@@ -1543,13 +1614,13 @@ static apr_status_t styleCombine_post_conf(apr_pool_t *p, apr_pool_t *plog, apr_
 	ap_add_version_component(p, MODULE_BRAND);
 	int resultCount = 0;
 
-	resultCount += configRequired(s, "pconfig", pConfig);
+	resultCount += configRequired(s, "scPconfig", pConfig);
 	if(resultCount) {
 		return !OK;
 	}
-	resultCount += configRequired(s, "appName", pConfig->appName->ptr);
-	resultCount += configRequired(s, "filterCntType", pConfig->filterCntType);
-	resultCount += configRequired(s, "versionFilePath", pConfig->versionFilePath);
+	resultCount += configRequired(s, "scAppName", pConfig->appName->ptr);
+	resultCount += configRequired(s, "scFilterCntType", pConfig->filterCntType);
+	resultCount += configRequired(s, "scVersionFilePath", pConfig->versionFilePath);
 	int i = 0, domainCount = 0;
 	for(i = 0; i < DOMAIN_COUNTS; i++) {
 		if(NULL == pConfig->newDomains[i] && NULL == pConfig->oldDomains[i]) {
@@ -1559,11 +1630,11 @@ static apr_status_t styleCombine_post_conf(apr_pool_t *p, apr_pool_t *plog, apr_
 			++domainCount;
 			continue;
 		}
-		resultCount += configRequired(s, "newDomains", pConfig->newDomains[i]);
-		resultCount += configRequired(s, "oldDomains", pConfig->oldDomains[i]);
+		resultCount += configRequired(s, "scNewDomains", pConfig->newDomains[i]);
+		resultCount += configRequired(s, "scOldDomains", pConfig->oldDomains[i]);
 	}
 	for(i = 0; i < domainCount; i++) {
-		resultCount += configRequired(s, "asyncVariableNames", pConfig->asyncVariableNames[i]);
+		resultCount += configRequired(s, "scAsyncVariableNames", pConfig->asyncVariableNames[i]);
 	}
 	if(resultCount) {
 		return !OK;
