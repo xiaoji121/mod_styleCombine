@@ -51,8 +51,9 @@ module AP_MODULE_DECLARE_DATA                styleCombine_module;
 
 #define BUFFER_PIECE_SIZE                    128
 #define DEFAULT_CONTENT_LEN                  (1024 << 8) //262144
-#define DOMAIN_COUNTS                        2
-#define MAX_STYLE_TAG_LEN                    2183
+#define DOMAINS_COUNT                        2
+#define PATTERNS_COUNT                       7
+
 //去右空格
 #define TRIM_RIGHT(p) while(isspace(*p)){ ++p; }
 
@@ -121,9 +122,10 @@ static server_rec  *server;
 /*position char */
 enum PositionEnum { TOP, HEAD, FOOTER, NONE };
 
-enum TagNameEnum { BHEAD, EHEAD, LINK, SCRIPT, TEXTAREA, COMMENT_EXPRESSION, TN_NONE };
-static char *patterns[6] = { "head", "/head", "link", "script", "textarea", "!--" };
-static int   patternsLen[6];
+enum TagNameEnum { BHEAD, EHEAD, EBODY, LINK, SCRIPT, TEXTAREA, COMMENT_EXPRESSION, TN_NONE };
+
+static char *patterns[PATTERNS_COUNT] = { "head", "/head", "/body", "link", "script", "textarea", "!--" };
+static int   patternsLen[PATTERNS_COUNT];
 
 typedef struct {
 	char              *ptr;
@@ -161,9 +163,9 @@ typedef struct {
 	char              *filterCntType;
 	char              *versionFilePath;
 	buffer            *appName;
-	buffer            *oldDomains[DOMAIN_COUNTS];
-	buffer            *newDomains[DOMAIN_COUNTS];
-	buffer            *asyncVariableNames[DOMAIN_COUNTS];
+	buffer            *oldDomains[DOMAINS_COUNT];
+	buffer            *newDomains[DOMAINS_COUNT];
+	buffer            *asyncVariableNames[DOMAINS_COUNT];
 	LinkedList        *blackList;
 	LinkedList        *whiteList;
 } CombineConfig;
@@ -597,7 +599,7 @@ static int parserTag(request_rec *r, CombineConfig *pConfig, int styleType, buff
 	int dIndex           = 0;
 	buffer *domain       = NULL;
 	char *tagBufPtr      = tagBuf->ptr,  *currURL = NULL;
-	for(dIndex = 0; dIndex < DOMAIN_COUNTS; dIndex++) {
+	for(dIndex = 0; dIndex < DOMAINS_COUNT; dIndex++) {
 		domain = pConfig->oldDomains[dIndex];
 		if(NULL == domain) {
 			continue;
@@ -932,7 +934,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 	buffer     *tagBuf    = buffer_init_size(req->pool, pConfig->maxUrlLen * 2);
 
 	//域名数组，用于存放不同域名下的styleMap
-	apr_hash_t *domains[DOMAIN_COUNTS] = {NULL, NULL};
+	apr_hash_t *domains[DOMAINS_COUNT] = {NULL, NULL};
 
 	//用于存放 同步（直接加载）的style列表
 	LinkedList *syncStyleList  = linked_list_create(req->pool);
@@ -940,11 +942,10 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 	//用于存放 异步的style列表
 	LinkedList *asyncStyleList = linked_list_create(req->pool);
 
-	int styleType              = 0, styleCount    = 0;
 	enum TagNameEnum tnameEnum = LINK;
+	int styleType              = 0, offsetLen = 0, styleCount = 0, isEHead = 0;
+	int isExpression           = 0, retIndex  = 0, bIndex     = 0, eIndex  = 0;
 	char *istr                 = input, *istrTemp = NULL;
-	int isExpression           = 0, retIndex = 0, bIndex = 0, eIndex = 0;
-	int offsetLen = 0;
 
 	while (*istr) {
 		if ('<' != *istr) {
@@ -965,12 +966,26 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 			add(req->pool, blockList, (void *) block);
 			RESET(bIndex, eIndex);
 			break;
-		case '/': // find </head>
-			retIndex = compare(istr, patterns[EHEAD], patternsLen[EHEAD], 0);
-			if(0 != retIndex) {
+		case '/': // find </head> </body>
+			switch(*(istr + 1)) {
+			case 'b':
+			case 'B':
+				tnameEnum = EBODY;
+				break;
+			case 'h':
+			case 'H':
+				tnameEnum = EHEAD;
+				break;
+			default:
 				NEXT_CHAR(istr, eIndex);
 				continue;
 			}
+
+			if(0 != compare(istr, patterns[tnameEnum], patternsLen[tnameEnum], 0)) {
+				NEXT_CHAR(istr, eIndex);
+				continue;
+			}
+
 			block         = contentBlock_create_init(req->pool, bIndex, --eIndex, EHEAD);
 			add(req->pool, blockList, (void *) block);
 			RESET(bIndex, eIndex);
@@ -998,6 +1013,8 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 			break;
 		case 'l': // find link
 		case 's': // find script
+			styleType                  = 0;
+			tnameEnum                  = LINK;
 			if('s' == *istr) { //默认是 link
 				styleType              = 1;
 				tnameEnum              = SCRIPT;
@@ -1128,54 +1145,59 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 			 */
 			retIndex = compare(istr, patterns[COMMENT_EXPRESSION], patternsLen[COMMENT_EXPRESSION], 0);
 			if (0 != retIndex) {
-				// 处理IE条件表达式是否结束
+				// 处理IE条件表达式是否结束 "<![endif]-->"
 				istrTemp = istr + 1;
 				if(0 == memcmp(istrTemp , "[endif]", 7)) {
 					isExpression = 0;
-					istr += 11, eIndex += 11;               //偏移 ![endif]--> 11个字符长度
+					NEXT_CHARS(istr, eIndex, 11);           //偏移 ![endif]--> 11个字符长度
 					continue;
 				}
-				istr++, eIndex++;                     //偏移 ! 1个字符长度
+				NEXT_CHAR(istr, eIndex);                    //偏移 ! 1个字符长度
 				continue;
 			}
-			istr += patternsLen[COMMENT_EXPRESSION];    //偏移 <!-- 4个长度
-			eIndex += patternsLen[COMMENT_EXPRESSION];
+			NEXT_CHARS(istr, eIndex, patternsLen[COMMENT_EXPRESSION]);  //偏移 <!-- 4个长度
 
-			// 对第6种语法结束进行判断处理
+			// 对第6种语法结束进行判断处理 "...<!--<![endif]-->"
 			if(0 == memcmp(istr, "<![endif]", 9)) {
 				isExpression = 0;
-				istr += 12, eIndex += 12;
+				NEXT_CHARS(istr, eIndex, 12);
 				continue;
 			}
 
-			// 处理当前是否为IE表达式开始
+			// 处理当前是否为IE表达式开始 "<!--[if IE xx]"
 			if(0 == memcmp(istr, "[if", 3)) {
 				isExpression = 1;
-				istr += 8, eIndex += 8;                     //偏移 [if IE]> 8个字符“以最小集的长度来换算，其它 eq IE9/ge IE6则忽略”
+				NEXT_CHARS(istr, eIndex, 8);                //偏移 [if IE]> 8个字符“以最小集的长度来换算，其它 eq IE9/ge IE6则忽略”
 				continue;
 			}
 
-			// 处理当前是一段 HTML 解释语法
+			// 跳过当前的HTML注释语法
 			while(*istr) {
 				if (0 == memcmp(istr, "-->", 3)) {
-					istr += 2, eIndex += 2;                 // 偏移 --> 3个字符长度，由于当前已经是-所以只需要偏移2位
+					NEXT_CHARS(istr, eIndex, 2);           // 偏移 --> 3个字符长度，由于当前已经是-所以只需要偏移2位
 					break;
 				}
-				istr++, eIndex++;
+				NEXT_CHAR(istr, eIndex);
 			}
 			break;
 		case 'i':
 			//<img
-			istr++, eIndex++;
+			NEXT_CHAR(istr, eIndex);
 			break;
 		default:
-			istr++, eIndex++;
+			NEXT_CHAR(istr, eIndex);
 			break;
 		}
 	}
 
+	//没有找到任何的style, 直接就可以返回了
+	if(0 == styleCount) {
+		return 0;
+	}
+
 	block         = contentBlock_create_init(req->pool, bIndex, eIndex, TN_NONE);
 	add(req->pool, blockList, (void *) block);
+
 	//test
 	ListNode *node = blockList->first;
 	for(; NULL != node; node = node->next) {
@@ -1223,17 +1245,17 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 	pConfig->filterCntType = "text/htm;text/html";
 	pConfig->appName       = NULL;
 	int i = 0;
-	for(i = 0; i < DOMAIN_COUNTS; i++) {
+	for(i = 0; i < DOMAINS_COUNT; i++) {
 		pConfig->oldDomains[i] = NULL;
 		pConfig->newDomains[i] = NULL;
 	}
 
-	for(i = 0; i < 6; i++) {
+	for(i = 0; i < PATTERNS_COUNT; i++) {
 		patternsLen[i] = strlen(patterns[i]);
 	}
 
 	char *variableNames    = "styleDomain0;styleDomain1;";
-	stringSplit(p, DOMAIN_COUNTS, pConfig->asyncVariableNames, variableNames, ';');
+	stringSplit(p, DOMAINS_COUNT, pConfig->asyncVariableNames, variableNames, ';');
 
 	pConfig->blackList     = linked_list_create(p);
 	pConfig->whiteList     = linked_list_create(p);
@@ -1469,7 +1491,7 @@ static const char *setOldDomains(cmd_parms *cmd, void *dummy, const char *arg) {
 	if ((NULL == arg) || (strlen(arg) <= 1)) {
 		return "styleCombine old domain value may not be null";
 	} else {
-		stringSplit(cmd->pool, DOMAIN_COUNTS, pConfig->oldDomains, apr_pstrdup(cmd->pool, arg), ';');
+		stringSplit(cmd->pool, DOMAINS_COUNT, pConfig->oldDomains, apr_pstrdup(cmd->pool, arg), ';');
 	}
 	return NULL;
 }
@@ -1479,7 +1501,7 @@ static const char *setNewDomains(cmd_parms *cmd, void *dummy, const char *arg) {
 	if ((NULL == arg) || (strlen(arg) <= 1)) {
 		return "styleCombine new domain value may not be null";
 	} else {
-		stringSplit(cmd->pool, DOMAIN_COUNTS, pConfig->newDomains, apr_pstrdup(cmd->pool, arg), ';');
+		stringSplit(cmd->pool, DOMAINS_COUNT, pConfig->newDomains, apr_pstrdup(cmd->pool, arg), ';');
 	}
 	return NULL;
 }
@@ -1489,7 +1511,7 @@ static const char *setAsyncVariableNames(cmd_parms *cmd, void *dummy, const char
 	if ((NULL == arg) || (strlen(arg) < 1)) {
 		return "styleCombine new domain value may not be null";
 	} else {
-		stringSplit(cmd->pool, DOMAIN_COUNTS, pConfig->asyncVariableNames, apr_pstrdup(cmd->pool, arg), ';');
+		stringSplit(cmd->pool, DOMAINS_COUNT, pConfig->asyncVariableNames, apr_pstrdup(cmd->pool, arg), ';');
 	}
 	return NULL;
 }
@@ -1633,7 +1655,7 @@ static apr_status_t styleCombine_post_conf(apr_pool_t *p, apr_pool_t *plog, apr_
 	resultCount += configRequired(s, "scFilterCntType", pConfig->filterCntType);
 	resultCount += configRequired(s, "scVersionFilePath", pConfig->versionFilePath);
 	int i = 0, domainCount = 0;
-	for(i = 0; i < DOMAIN_COUNTS; i++) {
+	for(i = 0; i < DOMAINS_COUNT; i++) {
 		if(NULL == pConfig->newDomains[i] && NULL == pConfig->oldDomains[i]) {
 			continue;
 		}
