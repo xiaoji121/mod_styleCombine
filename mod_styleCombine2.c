@@ -266,6 +266,7 @@ int prepare_buffer_size(apr_pool_t *pool, buffer *buf, size_t in_size) {
 	if(NULL == buf->ptr) {
 		return 0;
 	}
+	buf->ptr[0] = ZERO_END;
 	buf->size = size;
 	return size;
 }
@@ -912,9 +913,6 @@ static int isRepeat(request_rec *r, apr_hash_t *duplicats, StyleField *styleFiel
 	return 0;
 }
 
-static void parserWithCombine(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig) {
-}
-
 static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig) {
 
 	if (NULL == ctx->buf) {
@@ -928,7 +926,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 	//用于去重的 hash
 	apr_hash_t *duplicates= apr_hash_make(req->pool);
 
-	int styleType              = 0;
+	int styleType              = 0, styleCount    = 0;
 	enum TagNameEnum tnameEnum = LINK;
 	char *istr                 = input, *istrTemp = NULL;
 	int isExpression           = 0, retIndex = 0, bIndex = 0, eIndex = 0;
@@ -1017,6 +1015,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 				continue;
 			}
 			INIT_TAG_CONFIG(tagConfig, req, styleField, pConfig->newDomains[styleField->domainIndex], ctx->debugMode, 0, 0);
+			++styleCount; //计数有多少个style
 
 			//IE条件表达式里面的style不能做去重操作
 			if(isExpression) {
@@ -1091,7 +1090,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 		memcpy(buf, input+tb->bIndex, toffsetLen);
 		ap_log_error(APLOG_MARK, APLOG_ERR, 0, req->server, "[%s]", buf);
 	}
-	return 0;
+	return styleCount;
 }
 
 static int putValueToBuffer(buffer *buf, char *str) {
