@@ -9,8 +9,6 @@
 #include <sys/types.h>
 #include <ctype.h>
 #include <sys/stat.h>
-#include <malloc.h>
-
 #include "httpd.h"
 #include "apr_buckets.h"
 #include "http_config.h"
@@ -113,7 +111,7 @@ static int  CSS_PREFIX_LEN                    = 0, CSS_SUFFIX_LEN           = 0;
 
 static int         DEBUG_MODE_LEN             = 12;
 static const char  ZERO_END                   = '\0';
-static __time_t    prevTime                   = 0;
+static time_t      prevTime                   = 0;
 static char        *appRunMode                = NULL;
 static server_rec  *server;
 
@@ -368,7 +366,7 @@ static void loadStyleVersion(server_rec *server, apr_pool_t *req_pool, CombineCo
 		return;
 	}
 	apr_finfo_t  finfo;
-	prevTime                  = tm;
+	prevTime              = tm;
 	apr_status_t rc = apr_stat(&finfo, pConfig->versionFilePath, APR_FINFO_MIN, req_pool);
 	if(APR_SUCCESS != rc || finfo.mtime == svsEntry.mtime) {
 		return;
@@ -1038,12 +1036,25 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 			//buffer *nversion = getStrVersion(req, styleField->styleUri, pConfig);
 
 			break;
-		case '!': // find <!-- ... --> or <!--[if IE]> <!--[if IE 5.5]>....<![endif]-->
+		case '!':
+
+			/**
+			 * 对HTML语法的注释和IE注释表达式的支持
+			 *
+			 * 1.	<!--[if lt IE 7]> <html class="ie6" lang="en"> <![endif]-->   
+			 * 2.	<!--[if IE 7]>    <html class="ie7" lang="en"> <![endif]-->   
+			 * 3.	<!--[if IE 8]>    <html class="ie8" lang="en"> <![endif]-->   
+			 * 4.	<!--[if IE 9]>    <html class="ie9" lang="en"> <![endif]-->   
+			 * 5.	<!--[if gt IE 9]> <html lang="en"> <![endif]--> 
+			 * 6.	<!--[if !IE]>-->  <html lang="en"> <!--<![endif]--> 
+			 * 7.   <!--  .....  -->
+			 *
+			 */
 			retIndex = compare(istr, patterns[COMMENT_EXPRESSION], patternsLen[COMMENT_EXPRESSION], 0);
 			if (0 != retIndex) {
 				// 处理IE条件表达式是否结束
 				istrTemp = istr + 1;
-				if('[' == *istrTemp) {  //FIXME:可以再检查下后面是否为 endif]-->
+				if(0 == memcmp(istrTemp , "[endif]", 7)) {
 					isExpression = 0;
 					istr += 11, eIndex += 11;               //偏移 ![endif]--> 11个字符长度
 					continue;
@@ -1054,8 +1065,15 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 			istr += patternsLen[COMMENT_EXPRESSION];    //偏移 <!-- 4个长度
 			eIndex += patternsLen[COMMENT_EXPRESSION];
 
+			// 对第6种语法结束进行判断处理
+			if(0 == memcmp(istr, "<![endif]", 9)) {
+				isExpression = 0;
+				istr += 12, eIndex += 12;
+				continue;
+			}
+
 			// 处理当前是否为IE表达式开始
-			if('[' == *istr) {   //FIXME: 不能仅仅检查[ ,还需要检查里面是否存在if语句
+			if(0 == memcmp(istr, "[if", 3)) {
 				isExpression = 1;
 				istr += 8, eIndex += 8;                     //偏移 [if IE]> 8个字符“以最小集的长度来换算，其它 eq IE9/ge IE6则忽略”
 				continue;
