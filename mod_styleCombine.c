@@ -54,9 +54,6 @@ module AP_MODULE_DECLARE_DATA                styleCombine_module;
 #define DOMAINS_COUNT                        2
 #define PATTERNS_COUNT                       7
 
-//去右空格
-#define TRIM_RIGHT(p) while(isspace(*p)){ ++p; }
-
 #define BUFFER_CLEAN(buffer) if(NULL != buffer) { buffer->used = 0; buffer->ptr[0] = ZERO_END; }
 
 //解析field属性的值，有空格则去空格
@@ -109,6 +106,17 @@ module AP_MODULE_DECLARE_DATA                styleCombine_module;
 	}\
 }
 
+#define NEXT_CHARS(istr, eIndex, offset) { istr += offset, eIndex += offset; }
+
+#define NEXT_CHAR(istr, eIndex) { istr++, eIndex++; }
+
+#define RESET(bIndex, eIndex) { bIndex = eIndex + 1; }
+
+#define NEXT_CHARS_WITH_RESET(istr, bIndex, eIndex, offset) { \
+	NEXT_CHARS(istr, eIndex, offset); \
+	RESET(bIndex, eIndex); \
+}
+
 static int  JS_TAG_PREFIX_LEN                 = 0, JS_TAG_SUFFIX_LEN        = 0;
 static int  JS_TAG_EXT_PREFIX_LEN             = 0, JS_TAG_EXT_SUFFIX_LEN    = 0;
 static int  CSS_PREFIX_LEN                    = 0, CSS_SUFFIX_LEN           = 0;
@@ -142,7 +150,7 @@ typedef struct {
 	int                styleType; /*0:表示css; 1:表示js*/
 } StyleParserTag;
 
-static StyleParserTag *styleParserTags[2] = {NULL, NULL};
+static StyleParserTag *styleParserTags[2] = { NULL, NULL };
 
 typedef struct ListNode ListNode;
 struct ListNode {
@@ -559,13 +567,13 @@ static int parserTag(request_rec *r, CombineConfig *pConfig, int styleType, buff
 	if(NULL == pConfig || NULL == ptag || NULL == input || NULL == tagBuf) {
 		return 0;
 	}
-	char *inputTemp     = input;
-	//偏移开头部分(<link, <script), 传进来的input没有<打头，但所有的<link,<script 后面必须紧接空格，所以长度正好抵消
-	inputTemp          += ptag->prefix->used;
-	int count           = ptag->prefix->used;
+	int count = 0;
 	char ch , pchar;
+	BUFFER_CLEAN(tagBuf);
 
-	for(ch = *inputTemp; (ZERO_END != ch && ch != ptag->suffix); ch = *(++inputTemp), count++) {
+	NEXT_CHARS(input, count, ptag->prefix->used);
+
+	for(ch = *input; (ZERO_END != ch && ch != ptag->suffix); ch = *(++input), count++) {
 		//换行直接跳过, 并去除重复的空格
 		if('\n' == ch || '\r' == ch) {
 			continue;
@@ -583,17 +591,20 @@ static int parserTag(request_rec *r, CombineConfig *pConfig, int styleType, buff
 			return count;
 		}
 	}
-	tagBuf->ptr[tagBuf->used] = ZERO_END;
+	count                      += 1;
+	tagBuf->ptr[tagBuf->used++] = *input++;
+	tagBuf->ptr[tagBuf->used]   = ZERO_END;
 	if (ptag->styleType) {
 		//对script需要特别处理，因为它是以</script>为结束，那么需要确定它是否是这样的。
 		//如果不是那么则认为它是一个script代码块，或无效的js引用
-		++inputTemp, ++count;
-		TRIM_RIGHT(inputTemp);
-		if (memcmp(ptag->closeTag->ptr, inputTemp, ptag->closeTag->used) != 0) {
+		while(isspace(*input)) {
+			NEXT_CHAR(input, count);
+		}
+
+		if (memcmp(ptag->closeTag->ptr, input, ptag->closeTag->used) != 0) {
 			return count;
 		}
-		inputTemp       += ptag->closeTag->used;
-		count           += ptag->closeTag->used;
+		count += ptag->closeTag->used;
 	}
 	//===start parser===
 	int dIndex           = 0;
@@ -906,17 +917,6 @@ static int isRepeat(request_rec *r, apr_hash_t *duplicats, StyleField *styleFiel
 	return 0;
 }
 
-#define NEXT_CHARS(istr, eIndex, offset) { istr += offset, eIndex += offset; }
-
-#define NEXT_CHAR(istr, eIndex) { istr++, eIndex++; }
-
-#define RESET(bIndex, eIndex) { bIndex = eIndex; }
-
-#define NEXT_CHARS_WITH_RESET(istr, bIndex, eIndex, offset) { \
-	NEXT_CHARS(istr, eIndex, offset); \
-	RESET(bIndex, eIndex); \
-}
-
 static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig) {
 
 	if (NULL == ctx->buf) {
@@ -944,7 +944,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 
 	enum TagNameEnum tnameEnum = LINK;
 	int styleType              = 0, offsetLen = 0, styleCount = 0, isEHead = 0;
-	int isExpression           = 0, retIndex  = 0, bIndex     = 0, eIndex  = 0;
+	int isExpression           = 0, retIndex  = 0, bIndex     = 0, eIndex  = -1;
 	char *istr                 = input, *istrTemp = NULL;
 
 	while (*istr) {
@@ -977,18 +977,18 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 				tnameEnum = EHEAD;
 				break;
 			default:
-				NEXT_CHAR(istr, eIndex);
 				continue;
 			}
 
 			if(0 != compare(istr, patterns[tnameEnum], patternsLen[tnameEnum], 0)) {
-				NEXT_CHAR(istr, eIndex);
+				//NEXT_CHAR(istr, eIndex);
 				continue;
 			}
 
-			block         = contentBlock_create_init(req->pool, bIndex, --eIndex, tnameEnum);
+			block         = contentBlock_create_init(req->pool, bIndex, eIndex - 1, tnameEnum); // </
 			add(req->pool, blockList, (void *) block);
-			RESET(bIndex, eIndex);
+			//RESET(bIndex, eIndex);
+			bIndex        = eIndex;
 			NEXT_CHARS(istr, eIndex, patternsLen[tnameEnum] + 1);    //偏移 /head>|/body> 6个字符长度
 			break;
 		case 'T':
@@ -1013,21 +1013,23 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 			break;
 		case 'l': // find link
 		case 's': // find script
-			styleType                  = 0;
-			tnameEnum                  = LINK;
 			if('s' == *istr) { //默认是 link
 				styleType              = 1;
 				tnameEnum              = SCRIPT;
+			} else {
+				styleType                  = 0;
+				tnameEnum                  = LINK;
 			}
 			retIndex = compare(istr, patterns[tnameEnum], patternsLen[tnameEnum], 0);
 			if(0 != retIndex) {
 				NEXT_CHAR(istr, eIndex);
 				continue;
 			}
-			block         = contentBlock_create_init(req->pool, bIndex, --eIndex, tnameEnum);
-			add(req->pool, blockList, (void *) block);
-			RESET(bIndex, eIndex);
 
+			//扫过的内容位置记录下来保存到列表中
+			block         = contentBlock_create_init(req->pool, bIndex, eIndex - 1, tnameEnum);
+			add(req->pool, blockList, (void *) block);
+			bIndex        = eIndex;
 			//parser Tag
 			StyleField *styleField = NULL;
 			int retLen = parserTag(req, pConfig, styleType, tagBuf, &styleField, istr);
@@ -1036,12 +1038,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 				block->eIndex = eIndex;
 				continue;
 			}
-
-			//扫过的内容位置记录下来保存到列表中
-			block              = contentBlock_create_init(req->pool, bIndex, eIndex, TN_NONE);
-			add(req->pool, blockList, (void *) block);
 			NEXT_CHARS_WITH_RESET(istr, bIndex, eIndex, retLen);
-
 			TagConfig *tagConfig = (TagConfig *) apr_palloc(req->pool, sizeof(TagConfig));
 			if(NULL == tagConfig) {
 				//FIXME: 添加日志或其它处理
@@ -1053,7 +1050,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 			//IE条件表达式里面的style不能做去重操作
 			if(isExpression) {
 				styleField->version = getStrVersion(req, styleField->styleUri, pConfig);
-				block               = contentBlock_create_init(req->pool, -1, 0, TN_NONE);
+				block               = contentBlock_create_init(req->pool, -1, 0, tnameEnum);
 				block->cntBlock     = buffer_init_size(req->pool, tagConfig->domain->used + styleField->styleUri->used + 100);
 				add(req->pool, blockList, (void *) block);
 				addExtStyle(block->cntBlock, tagConfig);
@@ -1069,7 +1066,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 
 			//当没有使用异步并且又没有设置位置则保持原位不动
 			if(0 == styleField->async && NONE == styleField->position) {
-				block               = contentBlock_create_init(req->pool, 0, 1, TN_NONE);
+				block               = contentBlock_create_init(req->pool, -1, 0, tnameEnum);
 				block->cntBlock     = buffer_init_size(req->pool, tagConfig->domain->used + styleField->styleUri->used + 100);
 				add(req->pool, blockList, (void *) block);
 				addExtStyle(block->cntBlock, tagConfig);
@@ -1196,18 +1193,72 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 	}
 
 	//追加尾部的内容
-	block         = contentBlock_create_init(req->pool, bIndex, eIndex, TN_NONE);
+	block         = contentBlock_create_init(req->pool, bIndex, ++eIndex, TN_NONE);
 	add(req->pool, blockList, (void *) block);
+
+	//对解析出来的异步style URL与同步style进行去重。如果同步的style已经存在，则丢弃异步的style
+	for(ListNode *node = asyncStyleList->first; NULL != node; node = node->next) {
+		StyleList *styleList = (StyleList *) node->value;
+		for(k = 0; k < 2; k++) {
+			LinkedList *list = styleList->list[k];
+			if(NULL == list || !list->size) {
+				continue;
+			}
+			ListNode *parentNode = NULL;
+			ListNode *styleNode = (ListNode *) list->first;
+			while(NULL != styleNode) {
+				StyleField *styleField = (StyleField *) styleNode->value;
+				if(isRepeat(req, duplicates, styleField)) {
+					//if exeist delete this node
+					if(NULL == parentNode) {
+						list->first = styleNode->next;
+					} else {
+						parentNode->next = styleNode->next;
+					}
+					styleNode = styleNode->next;
+					--list->size;
+					continue;
+				}
+				parentNode = styleNode;
+				styleNode = styleNode->next;
+			}
+		}
+	}
+
+	//将解析出来的异步style URL进行合并
+
+	//将解析出来的同步style URL进行合并
+
+	//调式模式下的style输出格式
+
+	//输出
 
 	//test
 	ListNode *node = blockList->first;
 	for(; NULL != node; node = node->next) {
 		ContentBlock *tb = (ContentBlock *) node->value;
-		int toffsetLen =  tb->eIndex - tb->bIndex;
-		char *buf = apr_palloc(req->pool, toffsetLen);
-		memcpy(buf, input+tb->bIndex, toffsetLen);
-		ap_log_error(APLOG_MARK, APLOG_ERR, 0, req->server, "[%s]", buf);
+
+		char *buf = NULL;
+		if(NULL == tb->cntBlock) {
+			int toffsetLen =  tb->eIndex + 1 - tb->bIndex;
+			buf = apr_palloc(req->pool, toffsetLen);
+			memcpy(buf, input+tb->bIndex, toffsetLen);
+
+			addBucket(req->connection, ctx->pbbOut, ctx->buf->ptr + tb->bIndex, toffsetLen);
+		} else {
+			buf = tb->cntBlock->ptr;
+			addBucket(req->connection, ctx->pbbOut, tb->cntBlock->ptr, tb->cntBlock->used);
+		}
+
+		if(eIndex > 0) {
+			ap_log_error(APLOG_MARK, APLOG_ERR, 0, server, "bIndex[%d] eIndex[%d]  str[%s]", tb->bIndex, tb->eIndex, buf);
+		} else {
+			ap_log_error(APLOG_MARK, APLOG_ERR, 0, req->server, "str[%s]", buf);
+		}
 	}
+
+	ap_log_error(APLOG_MARK, APLOG_ERR, 0, req->server, "[%s]", ctx->buf->ptr);
+
 	return styleCount;
 }
 
@@ -1288,7 +1339,7 @@ static void *configServerCreate(apr_pool_t *p, server_rec *s) {
 		return NULL;
 	}
 	buffer *cssMark  = apr_palloc(p, sizeof(buffer));
-	if(!putValueToBuffer(cssCloseTag, "stylesheet")) {
+	if(!putValueToBuffer(cssMark, "stylesheet")) {
 		return NULL;
 	}
 	cssPtag->prefix = cssPrefix;
@@ -1442,10 +1493,10 @@ static apr_status_t styleCombineOutputFilter(ap_filter_t *f, apr_bucket_brigade 
 		if(APR_BUCKET_IS_EOS(pbktIn)) {
 			int pstatus = htmlParser(r, ctx, pConfig);
 			if(0 == pstatus) {  //FIXME: 没有找到任何的style，则直接保持原来的数据输出，不需要做任何变化
-
+				addBucket(r->connection, ctx->pbbOut, ctx->buf->ptr, ctx->buf->used);
 			}
-			addBucket(r->connection, ctx->pbbOut, ctx->buf->ptr, ctx->buf->used);
 			//append EOS
+			APR_BUCKET_REMOVE(pbktIn);
 			APR_BRIGADE_INSERT_TAIL(ctx->pbbOut, pbktIn);
 			apr_table_setn(r->notes, STYLE_COMBINE_NAME, "ok");
 			return ap_pass_brigade(f->next, ctx->pbbOut);
@@ -1653,7 +1704,6 @@ static apr_status_t styleCombine_post_conf(apr_pool_t *p, apr_pool_t *plog, apr_
 		return !OK;
 	}
 	resultCount += configRequired(s, "scAppName", pConfig->appName->ptr);
-	resultCount += configRequired(s, "scFilterCntType", pConfig->filterCntType);
 	resultCount += configRequired(s, "scVersionFilePath", pConfig->versionFilePath);
 	int i = 0, domainCount = 0;
 	for(i = 0; i < DOMAINS_COUNT; i++) {
