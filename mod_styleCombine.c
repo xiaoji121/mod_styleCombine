@@ -1052,6 +1052,53 @@ static void combineStylesAsync(request_rec *r, CombineConfig *pConfig, StyleList
 	STRING_APPEND(r->pool, headBuf, "},", 2);
 }
 
+/**
+ * 用于开发时，打开调试模块调用。将js/css的位置做移动，但不做合并
+ */
+static void combineStylesDebug(CombineConfig *pConfig, TagConfig *tagConfig, LinkedList *fullStyleList, buffer *combinedStyleBuf[]) {
+	ListNode *styleNode = NULL;
+	if(NULL == fullStyleList || NULL == (styleNode = fullStyleList->first)) {
+		return;
+	}
+	register buffer *combinedBuf = NULL;
+	register int i = 0;
+	for(; NULL != styleNode; styleNode = styleNode->next) {
+		StyleList *styleList = (StyleList *) styleNode->value;
+		for(i = 0; i < 2; i++) {
+			ListNode *node   = NULL;
+			LinkedList *list = styleList->list[i];
+			if(NULL == list || NULL == (node = list->first)) {
+				continue;
+			}
+			StyleField *styleField = (StyleField *)node->value;
+			if(NULL == styleField) {
+				continue;
+			}
+			if(NONE == styleField->position || styleField->async) {
+				combinedBuf = combinedStyleBuf[FOOTER];
+				if(NULL == combinedBuf) {
+					combinedStyleBuf[FOOTER] = combinedBuf = buffer_init_size(tagConfig->r->pool, 1024);
+				}
+			} else {
+				combinedBuf = combinedStyleBuf[styleField->position];
+				if(NULL == combinedBuf) {
+					combinedStyleBuf[styleField->position] = combinedBuf = buffer_init_size(tagConfig->r->pool, 1024);
+				}
+			}
+			tagConfig->styleField = styleField;
+			tagConfig->domain     = pConfig->newDomains[styleField->domainIndex];
+			tagConfig->isNewLine  = 1;
+			tagConfig->needExt    = 0;
+			for(; NULL != node; node = node->next) {
+				styleField            = (StyleField *) node->value;
+				tagConfig->styleField = styleField;
+				addExtStyle(combinedBuf, tagConfig);
+			}
+		}
+	}
+	return;
+}
+
 static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig) {
 
 	if (NULL == ctx->buf) {
@@ -1080,6 +1127,18 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 	//用于存放 异步的style列表
 	LinkedList *asyncStyleList = linked_list_create(req->pool);
 
+	/**
+	 * posHTMLTagExist
+	 *
+	 * html的位置标签是否存在，如果不存在则直接退合并（本模块将不做任何的事情，直接原样输出）
+	 * 所谓位置标签为：输出时的3个位置 top、head、footer
+	 * top是    <head> 尾部
+	 * head是   </head>前面
+	 * footer是 </body>前面
+	 *
+	 * 如果一个页面的HTML标签不具备这几个位置标签，则本次模块合并失败，直接原样输出HTML。产生一条日志做为提示。
+	 */
+	int  posHTMLTagExist       = 0;
 	int i = 0;
 	enum TagNameEnum tnameEnum = LINK;
 	int styleType              = 0, offsetLen = 0, styleCount = 0, isEHead = 0;
@@ -1104,6 +1163,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 			block         = contentBlock_create_init(req->pool, bIndex, eIndex, BHEAD);
 			add(req->pool, blockList, (void *) block);
 			RESET(bIndex, eIndex);
+			posHTMLTagExist += 1;
 			break;
 		case '/': // find </head> </body>
 			switch(*(istr + 1)) {
@@ -1127,6 +1187,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 			add(req->pool, blockList, (void *) block);
 			bIndex        = eIndex;
 			NEXT_CHARS(istr, eIndex, patternsLen[tnameEnum] + 1);    //偏移 /head>|/body> 6个字符长度
+			posHTMLTagExist += 1;
 			break;
 		case 'T':
 		case 't': // find <textarea ...>...</textarea>  must be suppor (upper&lower) case
@@ -1314,7 +1375,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 	}
 
 	//没有找到任何的style, 直接就可以返回了
-	if(0 == styleCount) {
+	if(0 == styleCount || posHTMLTagExist < 3) {
 		return 0;
 	}
 
@@ -1412,63 +1473,60 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 				combineStyles(pConfig, tagConfig, list, combinedStyleBuf, tmpUriBuf, versionBuf);
 			}
 		}
-	}
-	//调式模式下的style输出格式
-
-	//输出
-
-	//test
-	node = blockList->first;
-	for(; NULL != node; node = node->next) {
-		ContentBlock *tb = (ContentBlock *) node->value;
-
-		char *buf = NULL;
-		if(NULL == tb->cntBlock) {
-			int toffsetLen =  tb->eIndex + 1 - tb->bIndex;
-			buf = apr_palloc(req->pool, toffsetLen);
-			memcpy(buf, input+tb->bIndex, toffsetLen);
-
-			buffer *combinedBuf = NULL;
-			switch(tb->tagNameEnum) {
-			case BHEAD:
-				combinedBuf     = combinedStyleBuf[TOP];
-				addBucket(req->connection, ctx->pbbOut, ctx->buf->ptr + tb->bIndex, toffsetLen);
-				if(NULL != combinedBuf) {
-					addBucket(req->connection, ctx->pbbOut, combinedBuf->ptr, combinedBuf->used);
-				}
-				break;
-			case EHEAD:
-				combinedBuf     = combinedStyleBuf[HEAD];
-				if(NULL != combinedBuf) {
-					addBucket(req->connection, ctx->pbbOut, combinedBuf->ptr, combinedBuf->used);
-				}
-				addBucket(req->connection, ctx->pbbOut, ctx->buf->ptr + tb->bIndex, toffsetLen);
-				break;
-			case EBODY:
-				combinedBuf     = combinedStyleBuf[FOOTER];
-				addBucket(req->connection, ctx->pbbOut, ctx->buf->ptr + tb->bIndex, toffsetLen);
-				if(NULL != combinedBuf) {
-					addBucket(req->connection, ctx->pbbOut, combinedBuf->ptr, combinedBuf->used);
-				}
-				break;
-			default:
-				addBucket(req->connection, ctx->pbbOut, ctx->buf->ptr + tb->bIndex, toffsetLen);
-				break;
+	} else if(2 == ctx->debugMode) {
+		//调式模式下的style输出格式
+		combineStylesDebug(pConfig, tagConfig, syncStyleList, combinedStyleBuf);
+		for(i = 0; i < DOMAINS_COUNT; i++) {
+			LinkedList *asyncList = asyncSDGroups[i];
+			if(NULL != asyncList) {
+				combineStylesDebug(pConfig, tagConfig, asyncList, combinedStyleBuf);
 			}
-		} else {
-			buf = tb->cntBlock->ptr;
-			addBucket(req->connection, ctx->pbbOut, tb->cntBlock->ptr, tb->cntBlock->used);
-		}
-
-		if(eIndex > 0) {
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, server, "bIndex[%d] eIndex[%d]  str[%s]", tb->bIndex, tb->eIndex, buf);
-		} else {
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, req->server, "str[%s]", buf);
 		}
 	}
 
-	ap_log_error(APLOG_MARK, APLOG_ERR, 0, req->server, "[%s]", ctx->buf->ptr);
+	//按照顺序输出内容
+	for(node = blockList->first; NULL != node; node = node->next) {
+		block = (ContentBlock *) node->value;
+		if(NULL != block->cntBlock) {
+			addBucket(req->connection, ctx->pbbOut, block->cntBlock->ptr, block->cntBlock->used);
+			continue;
+		}
 
+		offsetLen              = block->eIndex + 1 - block->bIndex;
+		buffer *combinedUriBuf = NULL;
+		switch(block->tagNameEnum) {
+		case BHEAD:
+			combinedUriBuf     = combinedStyleBuf[TOP];
+			addBucket(req->connection, ctx->pbbOut, ctx->buf->ptr + block->bIndex, offsetLen);
+			if(NULL != combinedUriBuf) {
+				addBucket(req->connection, ctx->pbbOut, combinedUriBuf->ptr, combinedUriBuf->used);
+			}
+			break;
+		case EHEAD:
+			combinedUriBuf     = combinedStyleBuf[HEAD];
+			if(NULL != combinedUriBuf) {
+				addBucket(req->connection, ctx->pbbOut, combinedUriBuf->ptr, combinedUriBuf->used);
+			}
+			addBucket(req->connection, ctx->pbbOut, ctx->buf->ptr + block->bIndex, offsetLen);
+			break;
+		case EBODY:
+			combinedUriBuf     = combinedStyleBuf[FOOTER];
+			addBucket(req->connection, ctx->pbbOut, ctx->buf->ptr + block->bIndex, offsetLen);
+			if(NULL != combinedUriBuf) {
+				addBucket(req->connection, ctx->pbbOut, combinedUriBuf->ptr, combinedUriBuf->used);
+			}
+			break;
+		default:
+			addBucket(req->connection, ctx->pbbOut, ctx->buf->ptr + block->bIndex, offsetLen);
+			break;
+		}
+
+		//用于调度打印输出内容和坐标
+		if(10 == pConfig->printLog) {
+			char *buf = apr_pstrmemdup(req->pool, input + block->bIndex, offsetLen);
+			ap_log_error(APLOG_MARK, APLOG_ERR, 0, server, "bIndex[%d] eIndex[%d]  str[%s]", block->bIndex, block->eIndex, buf);
+		}
+	}
 	return styleCount;
 }
 
