@@ -1154,7 +1154,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 		switch (*istr) {
 		case 'H':
 		case 'h': // find <head>
-			retIndex = compare(istr, patterns[BHEAD], patternsLen[BHEAD], 0);
+			retIndex = compare(istr, patterns[BHEAD], patternsLen[BHEAD], 1);
 			if(0 != retIndex) {
 				NEXT_CHAR(istr, eIndex);                         //偏移 h 1个字符长度
 				continue;
@@ -1179,7 +1179,7 @@ static int htmlParser(request_rec *req, CombineCtx *ctx, CombineConfig *pConfig)
 				continue;
 			}
 
-			if(0 != compare(istr, patterns[tnameEnum], patternsLen[tnameEnum], 0)) {
+			if(0 != compare(istr, patterns[tnameEnum], patternsLen[tnameEnum], 1)) {
 				continue;
 			}
 
