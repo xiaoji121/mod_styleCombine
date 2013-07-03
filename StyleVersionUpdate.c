@@ -3,6 +3,8 @@
  *
  *  Created on: Jul 21, 2012
  *      Author: zhiwen
+ *  Updated on: Nov 12, 2012  terence.wangt  //增加对平滑发布的支持
+ *  Updated on: Jun 28, 2013  dongming.jidm  //修改checkLockStatus函数，增加对锁机制接口请求失败后重新请求功能
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,7 +14,13 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
+#define IPSTR "172.22.9.69"
+#define PORT 7001
+#define BUFSIZE 2048
 #define WGET_CMD "wget -S -t 1 -T 5 "
 #define BUFFER_PIECE_SIZE 128
 #define DEFAULT_BUF_LEN 65536
@@ -21,7 +29,7 @@
 #define LAST_MODIFIED_NAME "Last-Modified: "
 #define HEADER "\"--header=If-Modified-Since:"
 #define GZIP_CMD "/bin/gzip -cd "
-#define USAGE "v1.0.0 PARA ERROR SEE:--\n($1=http://xxxx/styleVersion.gz)\n($2=/home/admin/output/styleVersion.gz)\n($3=180)"
+#define USAGE "v1.0.0 PARA ERROR SEE:--\n($1=http://xxxx/styleVersion.gz)\n($2=/home/admin/output/styleVersion.gz)\n($3=180)\n($4=http://172.22.9.69:7001/GetLock?appkey=xxx)"
 int WGET_CMD_LEN = 0;
 int REPONSE_LOG_LEN = 0;
 int TMP_LEN = 0;
@@ -32,12 +40,15 @@ int LAST_MODIFIED_LEN = 40;
 
 const char ZERO_END = '\0';
 int debug = 1;
+int PORT_NUM = 80;
 
 typedef struct {
 	char *ptr;
 	off_t used;
 	off_t size;
 } buffer;
+
+buffer *IP_ADDRESS = NULL;
 
 void buffer_free(buffer *b) {
 	if(NULL == b) {
@@ -90,6 +101,7 @@ typedef struct {
 	buffer *expectVersionFilePath;
 	buffer *reponseFilePath;
 	buffer *tmpVersionFilePath;
+	buffer *lockRequestURL;
 }VersionUpdateConfig;
 
 void initGlobalVar(){
@@ -251,11 +263,19 @@ void intervalWork(VersionUpdateConfig *config) {
 		if(debug) {
 			fprintf(stdout, "httpStatus:%d\n", httpStatus);
 		}
-
+		// ignore the lock checke for the first version file request
+		if(0 != httpStatus && 404 != httpStatus) {
+			int bLocked = checkLockStatus(config->lockRequestURL->ptr);
+			if(bLocked){
+				sleep(config->intervalSecond);
+				continue;
+			}
+		}
 		if(304 != httpStatus) {
 			getLastModified(responseCnt, &lastModifiedTime);
 		}
 		debug_buffer(lastModifiedTime, "lastModifiedTime");
+		
 		//thread interval exec
 		buffer *cmdBuf = buffer_init_size(LAST_MODIFIED_LEN + WGET_CMD_LEN + HEADER_LEN + param->used);
 		stringAppend(cmdBuf, WGET_CMD, WGET_CMD_LEN);
@@ -282,9 +302,143 @@ void intervalWork(VersionUpdateConfig *config) {
 	}
 }
 
+
+int checkLockStatus(char *lockURL){
+	
+    int locked = 0;
+    int sockfd;
+    struct sockaddr_in address;
+    char buf[BUFSIZE];
+    int ret;
+    // 连接接口失败时的重连次数
+    int reConnectTimes = 3;
+    int connectedSuccess = 0;
+    
+    if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0 ) {
+        if (debug) {
+            printf("创建socket失败\n");
+        }
+        return 0;
+    };
+    
+    bzero(&address, sizeof(address));
+
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = inet_addr(IP_ADDRESS->ptr);
+    address.sin_port = htons(PORT_NUM);
+    
+    int result = connect(sockfd,  (struct sockaddr *)&address, sizeof(address));
+    
+    if(-1 == result){
+        //重连3次
+        while(reConnectTimes) {
+            result = connect(sockfd,  (struct sockaddr *)&address, sizeof(address));
+            
+            if(-1 == result) {
+                sleep(1);
+                reConnectTimes--;
+            } else {
+                connectedSuccess = 1;
+                break;
+            }
+        }
+        
+    } else {
+        connectedSuccess = 1;
+    }
+    
+    if (!connectedSuccess) {
+        if (debug) {
+            printf("锁接口连接失败\n");
+        }
+        close(sockfd);
+        return 0;
+    }
+	
+    ret = write(sockfd, lockURL, strlen(lockURL));
+    
+    if (ret < 0) {
+        if (debug) {
+            printf("向锁接口发送请求失败\n");
+        }
+        close(sockfd);
+        return 0;
+    }
+    
+    int size=read(sockfd, buf, BUFSIZE-1);
+	
+    if(size > 0){
+        char *bSuccess = strstr(buf, "\"success\":true");
+        char *bLocked  = strstr(buf, "\"locked\":true");
+        if(bSuccess && bLocked){
+            locked = 1;
+        }
+    } else {
+        if (debug) {
+            printf("读取锁接口数据失败\n");
+        }
+    }
+    close(sockfd);
+    return locked;
+}
+
+
+int parseLockUrl(char *lockURL, VersionUpdateConfig *config){
+	
+	char *paramURL = NULL;
+	char reqStr[256];
+	char portStr[16];
+	int  ipLen;
+	int  portLen;
+	int  reqLen;
+	
+	memset(reqStr, 0, 256);
+	memset(portStr, 0, 16);
+
+	//Trim the http://
+	char *pStart = strstr(lockURL, "http://");
+	if(NULL == pStart){
+		return 0;
+	}
+	
+	lockURL  = lockURL + strlen("http://");
+	paramURL = strchr(lockURL, '/');
+	if(NULL == paramURL){
+		return 0;
+	}
+		
+	//Get port number
+	char *port = strchr(lockURL, ':');
+	if(NULL != port){
+		portLen = paramURL - port -1;
+		strncpy(portStr, port +1, portLen);
+		PORT_NUM = atoi(portStr);
+		ipLen = port - lockURL;
+	}else{
+		ipLen = paramURL - lockURL;
+	}
+	
+	IP_ADDRESS = buffer_init_size(ipLen + 1);
+	stringAppend(IP_ADDRESS, lockURL, ipLen);
+	
+	strcat(reqStr, "GET ");
+	strcat(reqStr, paramURL);
+	strcat(reqStr, " HTTP/1.1\r\n");
+	strcat(reqStr, "Host: ");
+	strcat(reqStr, IP_ADDRESS->ptr);
+	strcat(reqStr, "\r\nConnection: Close\r\n\r\n");
+		
+	reqLen = strlen(reqStr);
+	buffer *lockRequestURL = buffer_init_size(reqLen + 1);
+	stringAppend(lockRequestURL, reqStr, reqLen);
+	config->lockRequestURL = lockRequestURL;
+	
+	return 1;
+}
+
 void parseArgs(VersionUpdateConfig *config, int argc, char *args[]) {
 
-	if(argc < 3) {
+	if(argc < 4) {
 		fprintf(stderr, "USAGE:%s\n", USAGE);
 		exit(3);
 	}
@@ -299,14 +453,19 @@ void parseArgs(VersionUpdateConfig *config, int argc, char *args[]) {
 	char *URL = args[1];
 	char *path = args[2];
 	int   intervalSecond = atoi(args[3]);
+	char *lockURL = args[4];
 
-	if(argc > 4) {
-		debug = atoi(args[4]);
+	if(argc > 5) {
+		debug = atoi(args[5]);
 	}
 	//global var
 	size_t URLLen = strlen(URL);
 	size_t pathLen = strlen(path);
-
+	
+	if(!parseLockUrl(lockURL, config)){
+		exit(1);
+	}
+	
 	//interval time
 	config->intervalSecond = intervalSecond;
 	//url
@@ -314,6 +473,7 @@ void parseArgs(VersionUpdateConfig *config, int argc, char *args[]) {
 	stringAppend(URLDomain, URL, URLLen);
 	config->URLDomain = URLDomain;
 	debug_buffer(URLDomain, "URLDomain");
+	
 	//dir
 	buffer *versionFileDir = buffer_init_size(pathLen + 1);
 	char *lastChar = strrchr(path, '/');
